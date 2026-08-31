@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Pianiol — falling notes for any song</title>
+<meta name="description" content="Pianiol finds the notes for a song and rains them onto a piano — or any instrument. Share a video from YouTube or TikTok straight into Pianiol.">
+<meta name="theme-color" content="#0b0f1a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ============ HOME SCREEN ============ -->
+<main id="home" class="screen">
+  <header class="home-header">
+    <div class="logo">
+      <span class="logo-mark">🎹</span>
+      <h1>Pianiol</h1>
+    </div>
+    <p class="tagline">Find a song. Watch the notes fall. Play along on any instrument.</p>
+  </header>
+
+  <div class="search-wrap">
+    <input id="search-input" type="search" placeholder="Find a song… (e.g. Für Elise, Tetris)" autocomplete="off" enterkeyhint="search">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+
+  <div class="action-row">
+    <button id="btn-import" class="action-card">
+      <span class="action-emoji">📂</span>
+      <span class="action-label">Import MIDI</span>
+      <span class="action-sub">Any .mid file</span>
+    </button>
+    <button id="btn-link" class="action-card">
+      <span class="action-emoji">🔗</span>
+      <span class="action-label">Paste a link</span>
+      <span class="action-sub">YouTube / TikTok</span>
+    </button>
+    <button id="btn-listen" class="action-card">
+      <span class="action-emoji">🎤</span>
+      <span class="action-label">Listen</span>
+      <span class="action-sub">Transcribe by ear</span>
+    </button>
+  </div>
+  <input id="midi-file" type="file" accept=".mid,.midi,audio/midi,audio/x-midi" hidden>
+
+  <div id="install-hint" class="install-hint" hidden>
+    <div class="install-text">
+      <strong>Add Pianiol to your share menu</strong>
+      <span>Install the app, then share any video from YouTube or TikTok to Pianiol and it will find the notes.</span>
+    </div>
+    <button id="btn-install" class="btn btn-primary">Install</button>
+  </div>
+
+  <section class="library">
+    <h2>Song library</h2>
+    <div id="song-grid" class="song-grid"></div>
+  </section>
+
+  <footer class="home-footer">
+    <p>Tip: on Android, install Pianiol and it appears in the YouTube &amp; TikTok share sheet. On other platforms, copy the video link and use <em>Paste a link</em>.</p>
+  </footer>
+</main>
+
+<!-- ============ PLAYER SCREEN ============ -->
+<section id="player" class="screen" hidden>
+  <div class="player-top">
+    <button id="btn-back" class="icon-btn" title="Back">←</button>
+    <div class="player-title">
+      <strong id="player-song-title">—</strong>
+      <span id="player-song-artist"></span>
+    </div>
+    <select id="instrument-select" class="pill-select" title="Instrument"></select>
+    <select id="speed-select" class="pill-select" title="Speed">
+      <option value="0.5">0.5×</option>
+      <option value="0.75">0.75×</option>
+      <option value="1" selected>1×</option>
+      <option value="1.25">1.25×</option>
+      <option value="1.5">1.5×</option>
+    </select>
+  </div>
+
+  <div class="canvas-wrap">
+    <canvas id="stage"></canvas>
+  </div>
+
+  <div class="player-bottom">
+    <button id="btn-play" class="play-btn" title="Play/Pause">▶</button>
+    <span id="time-now" class="time-label">0:00</span>
+    <input id="seek-bar" class="seek-bar" type="range" min="0" max="1000" value="0" step="1">
+    <span id="time-total" class="time-label">0:00</span>
+    <div class="transpose-wrap" title="Transpose">
+      <button id="btn-transpose-down" class="icon-btn small">♭</button>
+      <span id="transpose-label">0</span>
+      <button id="btn-transpose-up" class="icon-btn small">♯</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SHARE / MATCH SHEET ============ -->
+<div id="sheet-backdrop" class="sheet-backdrop" hidden>
+  <div id="match-sheet" class="sheet" role="dialog" aria-modal="true">
+    <button class="sheet-close" data-close-sheet title="Close">✕</button>
+    <div id="match-loading" class="match-loading">
+      <div class="spinner"></div>
+      <p>Finding your song…</p>
+    </div>
+    <div id="match-content" hidden>
+      <div class="match-video">
+        <img id="match-thumb" alt="" hidden>
+        <div>
+          <strong id="match-title">Shared video</strong>
+          <span id="match-author" class="muted"></span>
+        </div>
+      </div>
+      <h3 id="match-heading">Best matches in the library</h3>
+      <div id="match-list" class="match-list"></div>
+      <div class="match-fallback">
+        <p class="muted">Not the right one?</p>
+        <div class="fallback-btns">
+          <button id="match-listen" class="btn">🎤 Listen &amp; transcribe</button>
+          <button id="match-import" class="btn">📂 Import a MIDI</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ PASTE LINK SHEET ============ -->
+<div id="link-backdrop" class="sheet-backdrop" hidden>
+  <div class="sheet" role="dialog" aria-modal="true">
+    <button class="sheet-close" data-close-sheet title="Close">✕</button>
+    <h3>Paste a video link</h3>
+    <p class="muted">Drop in a YouTube or TikTok link and Pianiol will look up the song.</p>
+    <form id="link-form" class="link-form">
+      <input id="link-input" type="url" placeholder="https://youtube.com/watch?v=… or tiktok.com/…" required>
+      <button class="btn btn-primary" type="submit">Find notes</button>
+    </form>
+  </div>
+</div>
+
+<!-- ============ LISTEN SHEET ============ -->
+<div id="listen-backdrop" class="sheet-backdrop" hidden>
+  <div class="sheet" role="dialog" aria-modal="true">
+    <button class="sheet-close" data-close-sheet title="Close">✕</button>
+    <h3>Listen mode</h3>
+    <p class="muted">Play the song out loud — from the video, another device, or your own instrument. Pianiol listens and writes down the melody. Works best with a single clear melody line.</p>
+    <div class="listen-viz">
+      <div id="listen-note" class="listen-note">—</div>
+      <div class="level-meter"><div id="level-fill" class="level-fill"></div></div>
+      <div id="listen-count" class="muted">0 notes heard</div>
+    </div>
+    <div class="fallback-btns">
+      <button id="btn-record" class="btn btn-primary">● Start listening</button>
+      <button id="btn-record-done" class="btn" hidden>✓ Done — show my notes</button>
+    </div>
+    <p id="listen-error" class="error-text" hidden></p>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
