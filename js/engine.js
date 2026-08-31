@@ -37,7 +37,8 @@ function clamp(v, lo, hi) {
 }
 
 function roundRectPath(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w * 0.5, h * 0.5);
+  if (w <= 0 || h <= 0) return ctx.beginPath();
+  const rr = Math.max(0, Math.min(r, w * 0.5, h * 0.5));
   ctx.beginPath();
   ctx.moveTo(x + rr, y);
   ctx.lineTo(x + w - rr, y);
@@ -53,7 +54,8 @@ function roundRectPath(ctx, x, y, w, h, r) {
 
 // Rounded only at the bottom (piano keys sit flush against the hit line).
 function bottomRoundRectPath(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w * 0.5, h * 0.5);
+  if (w <= 0 || h <= 0) return ctx.beginPath();
+  const rr = Math.max(0, Math.min(r, w * 0.5, h * 0.5));
   ctx.beginPath();
   ctx.moveTo(x, y);
   ctx.lineTo(x + w, y);

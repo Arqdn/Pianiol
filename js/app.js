@@ -275,6 +275,7 @@ async function handleVideoUrl(videoUrl, rawTitle) {
 
   const thumb = videoUrl ? videoIdThumb(videoUrl) : null;
   const thumbEl = $('#match-thumb');
+  thumbEl.onerror = () => { thumbEl.hidden = true; };
   if (thumb) { thumbEl.src = thumb; thumbEl.hidden = false; } else { thumbEl.hidden = true; }
   $('#match-title').textContent = title || 'Shared video';
   $('#match-author').textContent = author;
