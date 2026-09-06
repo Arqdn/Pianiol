@@ -6,7 +6,11 @@ import { SONGS, songToNotes, midiToName } from './library.js';
 import { searchSongs } from './search.js';
 import { parseSharedParams, extractUrlFromText, videoIdThumb } from './share.js';
 import { resolve, loadCandidate } from './finder.js';
-import { AI_MODELS, getApiKey, setApiKey, hasApiKey, getAiModel, setAiModel } from './ai.js';
+import {
+  PROVIDERS, AI_MODELS, OPENROUTER_DEFAULT_MODEL,
+  getProvider, setProvider, detectProvider, applySetupParams,
+  getApiKey, setApiKey, hasApiKey, getAiModel, setAiModel,
+} from './ai.js';
 import { Transcriber } from './transcribe.js';
 
 const $ = sel => document.querySelector(sel);
@@ -92,19 +96,55 @@ function onlineEnabled() {
 function maskKey(key) {
   return key.length > 12 ? `${key.slice(0, 7)}…${key.slice(-4)}` : '••••';
 }
+function providerLabel(id) {
+  return id === 'openrouter' ? 'OpenRouter' : 'Claude';
+}
+const PROVIDER_NOTES = {
+  anthropic: 'Get a key at console.anthropic.com → API keys, and set a spending limit there. A typical song costs a few cents. Declined requests fall back to another Claude model automatically.',
+  openrouter: 'Get a key at openrouter.ai → Keys. The default model, NVIDIA Nemotron Ultra (free tier), costs nothing; any OpenRouter model id works in the box above.',
+};
 function refreshAiUi() {
-  const has = hasApiKey();
-  $('#ai-card-sub').textContent = has ? 'Ready' : 'Set up';
+  const provider = getProvider();
+  const has = hasApiKey(provider);
+  $('#ai-card-sub').textContent = has ? `Ready · ${providerLabel(provider)}` : 'Set up';
   $('#btn-ai').classList.toggle('ready', has);
-  $('#ai-key-status').textContent = has ? `Key saved: ${maskKey(getApiKey())}` : 'No key saved yet.';
+  $('#ai-provider-select').value = provider;
+  $('#ai-key-status').textContent = has
+    ? `${providerLabel(provider)} key saved: ${maskKey(getApiKey(provider))}`
+    : `No ${providerLabel(provider)} key saved yet.`;
   $('#ai-key-input').value = '';
-  $('#ai-key-input').placeholder = has ? 'Paste a new key to replace it' : 'sk-ant-…';
-  $('#ai-model-select').value = getAiModel();
+  $('#ai-key-input').placeholder = has ? 'Paste a new key to replace it' : (provider === 'openrouter' ? 'sk-or-…' : 'sk-ant-…');
+  const isOr = provider === 'openrouter';
+  $('#ai-model-select').hidden = isOr;
+  $('#ai-or-model-input').hidden = !isOr;
+  if (isOr) $('#ai-or-model-input').value = getAiModel('openrouter');
+  else $('#ai-model-select').value = getAiModel('anthropic');
+  $('#ai-provider-note').textContent = PROVIDER_NOTES[provider];
   $('#ai-online-toggle').checked = onlineEnabled();
   $('#ai-remove-key').hidden = !has;
 }
 
+// Save a key typed anywhere; a recognizable prefix picks the provider automatically.
+function saveKey(key) {
+  const detected = detectProvider(key);
+  const provider = setApiKey(key, detected || getProvider());
+  toast(detected
+    ? `${providerLabel(provider)} key saved on this device.`
+    : `Key saved for ${providerLabel(provider)} (prefix not recognised — change the provider under ✨ AI notes if needed).`);
+  refreshAiUi();
+  return provider;
+}
+
 (() => {
+  const provSel = $('#ai-provider-select');
+  for (const p of PROVIDERS) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name;
+    provSel.appendChild(opt);
+  }
+  provSel.addEventListener('change', () => { setProvider(provSel.value); refreshAiUi(); });
+
   const sel = $('#ai-model-select');
   for (const m of AI_MODELS) {
     const opt = document.createElement('option');
@@ -112,7 +152,11 @@ function refreshAiUi() {
     opt.textContent = m.name;
     sel.appendChild(opt);
   }
-  sel.addEventListener('change', () => setAiModel(sel.value));
+  sel.addEventListener('change', () => setAiModel(sel.value, 'anthropic'));
+  $('#ai-or-model-input').addEventListener('change', e => {
+    setAiModel(e.target.value.trim() || OPENROUTER_DEFAULT_MODEL, 'openrouter');
+    refreshAiUi();
+  });
   $('#ai-online-toggle').addEventListener('change', e => {
     try { localStorage.setItem('pianiol.online', e.target.checked ? '1' : '0'); } catch { /* ignore */ }
   });
@@ -120,11 +164,17 @@ function refreshAiUi() {
   $('#ai-form').addEventListener('submit', e => {
     e.preventDefault();
     const key = $('#ai-key-input').value.trim();
-    if (key) { setApiKey(key); toast('API key saved on this device.'); }
-    refreshAiUi();
-    if (key) closeSheet($('#ai-backdrop'));
+    if (key) { saveKey(key); closeSheet($('#ai-backdrop')); }
+    else refreshAiUi();
   });
-  $('#ai-remove-key').addEventListener('click', () => { setApiKey(''); refreshAiUi(); toast('API key removed.'); });
+  $('#ai-remove-key').addEventListener('click', () => { setApiKey('', getProvider()); refreshAiUi(); toast('API key removed.'); });
+
+  // One-tap setup link (#setup&provider=…&key=…) — saved to this device, then scrubbed from the URL.
+  const applied = applySetupParams(location.hash);
+  if (applied) {
+    history.replaceState(null, '', location.pathname + location.search);
+    toast(`✨ AI notes ready — using ${providerLabel(applied.provider)}.`, 4500);
+  }
   refreshAiUi();
 })();
 
@@ -429,8 +479,7 @@ $('#match-key-form').addEventListener('submit', e => {
   e.preventDefault();
   const key = $('#match-key-input').value.trim();
   if (!key) return;
-  setApiKey(key);
-  refreshAiUi();
+  saveKey(key);
   if (lastInput) findAndPlay(lastInput.input, { rawTitle: lastInput.rawTitle });
 });
 
@@ -471,7 +520,7 @@ async function findAndPlay(input, { rawTitle = '' } = {}) {
       toSong: songToNotes,
       rawTitle,
       signal,
-      ai: { apiKey: getApiKey(), model: getAiModel() },
+      ai: { provider: getProvider(), apiKey: getApiKey(), model: getAiModel() },
       online: { enabled: onlineEnabled() },
       onStatus(msg) { if (!signal.aborted) { setStatus(msg); } },
     });

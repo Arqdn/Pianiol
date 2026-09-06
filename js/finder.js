@@ -310,7 +310,7 @@ export async function resolve(input, { library, toSong, rawTitle = '', onStatus,
     try {
       const song = await composeSong(
         { title: identity.title || identity.videoTitle, artist: identity.artist, context: identity.videoTitle },
-        { apiKey: ai.apiKey, model: ai.model, signal, onStatus },
+        { provider: ai.provider, apiKey: ai.apiKey, model: ai.model, signal, onStatus },
       );
       return { kind: 'ai', identity, song, candidates: libCandidates, score: 1 };
     } catch (err) {
