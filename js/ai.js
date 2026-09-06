@@ -134,7 +134,9 @@ async function streamMessage(body, { apiKey, signal, onProgress }) {
         if (!line.startsWith('data:')) continue;
         const json = line.slice(5).trim();
         if (!json || json === '[DONE]') continue;
-        try { handle(JSON.parse(json)); } catch (err) { if (err.message !== 'Unexpected token') throw err; }
+        let evt;
+        try { evt = JSON.parse(json); } catch { continue; } // skip a malformed frame, keep streaming
+        handle(evt); // API 'error' events throw from here on purpose
       }
     }
   }
