@@ -12,6 +12,9 @@ import {
   getApiKey, setApiKey, hasApiKey, getAiModel, setAiModel,
 } from './ai.js';
 import { Transcriber } from './transcribe.js';
+import { isSupported as mlSupported, decodeFile, AudioCapture, getMicStream, getTabStream, transcribeSamples } from './transcribe-ml.js';
+import { midiInputSupported, connectMidiInput } from './midi-input.js';
+import { askCoach } from './coach.js';
 
 const $ = sel => document.querySelector(sel);
 
@@ -37,6 +40,8 @@ function closeAllSheets() {
   for (const el of document.querySelectorAll('.sheet-backdrop')) el.hidden = true;
   stopListening(false);
   cancelResolve();
+  cancelExact();
+  cancelCoach();
 }
 
 document.addEventListener('click', e => {
@@ -192,7 +197,181 @@ function initEngine() {
       if (!seeking && d > 0) $('#seek-bar').value = String(Math.round((t / d) * 1000));
       $('#time-now').textContent = fmtTime(t);
     },
-    onEnd() { setPlayIcon(false); },
+    onEnd() {
+      setPlayIcon(false);
+      if (mode === 'learn' && engine.stats.hits + engine.stats.misses >= 4) offerCoach('You finished the song!');
+    },
+    onWait(targets) { showLearnHint(targets); },
+    onLearnEvent(evt) {
+      if (evt.type === 'hit' || evt.type === 'miss') updateLearnStats();
+      if (evt.type === 'loop' && evt.count % 3 === 0 && mode === 'learn') offerCoach(`Loop ${evt.count} done.`);
+    },
+  });
+}
+
+/* ---------------- learn mode ---------------- */
+
+let mode = 'play';
+let loopA = null;
+let coachOffered = false;
+
+function showLearnHint(targets) {
+  const el = $('#learn-hint');
+  if (mode !== 'learn') { el.hidden = true; return; }
+  if (targets && targets.length) {
+    el.textContent = 'Play: ' + targets.map(t => t.name).join(' + ');
+    el.classList.remove('done');
+    el.hidden = false;
+  } else {
+    el.hidden = true;
+  }
+}
+
+function updateLearnStats() {
+  if (!engine) return;
+  const s = engine.stats;
+  const total = s.hits + s.misses;
+  $('#learn-stats').textContent = `✔ ${s.hits} · ✖ ${s.misses}${total ? ` · ${Math.round(s.accuracy * 100)}%` : ''}`;
+}
+
+function setMode(next) {
+  mode = next === 'learn' ? 'learn' : 'play';
+  for (const b of document.querySelectorAll('#mode-seg .seg-btn')) b.classList.toggle('active', b.dataset.mode === mode);
+  $('#learn-bar').hidden = mode !== 'learn';
+  if (engine) {
+    const hands = document.querySelector('#hands-seg .seg-btn.active')?.dataset.hands || 'both';
+    engine.setLearn(mode === 'learn', { hands, hints: $('#hints-toggle').checked });
+    if (mode === 'learn') { engine.resetStats(); coachOffered = false; updateLearnStats(); }
+  }
+  if (mode !== 'learn') showLearnHint(null);
+}
+
+document.querySelectorAll('#mode-seg .seg-btn').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+document.querySelectorAll('#hands-seg .seg-btn').forEach(b => b.addEventListener('click', () => {
+  for (const x of document.querySelectorAll('#hands-seg .seg-btn')) x.classList.toggle('active', x === b);
+  if (engine) engine.setLearnHands(b.dataset.hands);
+}));
+$('#hints-toggle').addEventListener('change', e => { if (engine) engine.setHints(e.target.checked); });
+
+function refreshLoopUi() {
+  const lp = engine && engine.loop;
+  $('#loop-clear').hidden = !lp && loopA == null;
+  $('#loop-a').classList.toggle('active', loopA != null || !!lp);
+  $('#loop-b').classList.toggle('active', !!lp);
+  $('#loop-label').textContent = lp ? `Loop ${fmtTime(lp.start)}–${fmtTime(lp.end)}` : loopA != null ? `A = ${fmtTime(loopA)} · now set B` : '';
+}
+$('#loop-a').addEventListener('click', () => {
+  if (!engine) return;
+  loopA = engine.time;
+  engine.clearLoop();
+  refreshLoopUi();
+});
+$('#loop-b').addEventListener('click', () => {
+  if (!engine) return;
+  const b = engine.time;
+  const a = loopA != null ? loopA : Math.max(0, b - 8);
+  if (b - a < 0.5) { toast('Move a bit further into the song before setting B.'); return; }
+  engine.setLoop(a, b);
+  loopA = null;
+  refreshLoopUi();
+});
+$('#loop-clear').addEventListener('click', () => { if (engine) engine.clearLoop(); loopA = null; refreshLoopUi(); });
+
+function applyPlan(plan) {
+  if (!engine || !currentSong) return;
+  setMode('learn');
+  for (const x of document.querySelectorAll('#hands-seg .seg-btn')) x.classList.toggle('active', x.dataset.hands === plan.hands);
+  engine.setLearnHands(plan.hands);
+  const opts = [...$('#speed-select').options].map(o => parseFloat(o.value));
+  const nearest = opts.reduce((best, v) => Math.abs(v - plan.speed) < Math.abs(best - plan.speed) ? v : best, opts[0]);
+  $('#speed-select').value = String(nearest);
+  engine.setSpeed(nearest);
+  engine.setLoop(plan.startSec, plan.endSec);
+  loopA = null;
+  refreshLoopUi();
+  engine.resetStats();
+  updateLearnStats();
+  engine.seek(plan.startSec);
+  synth.unlock().then(() => { engine.play(); setPlayIcon(true); });
+  toast(`🎓 ${plan.label}`, 4000);
+}
+
+/* ---------------- AI coach ---------------- */
+
+let coachCtrl = null;
+let coachPlan = null;
+
+function cancelCoach() {
+  if (coachCtrl) { coachCtrl.abort(); coachCtrl = null; }
+}
+
+function offerCoach(reason) {
+  if (coachOffered || !hasApiKey()) return;
+  coachOffered = true;
+  toast(`${reason} Tap ✨ Coach for feedback on what to practise.`, 5000);
+}
+
+async function runCoach() {
+  if (!engine || !currentSong) { toast('Open a song first.'); return; }
+  if (!hasApiKey()) { refreshAiUi(); openSheet($('#ai-backdrop')); toast('Add an AI key so the coach can look at your playing.'); return; }
+  const stats = engine.stats;
+  if (stats.hits + stats.misses < 1) { toast('Play a little in Learn mode first, then ask the coach.'); return; }
+  cancelCoach();
+  coachCtrl = new AbortController();
+  const { signal } = coachCtrl;
+  if (engine.state === 'playing') { engine.pause(); setPlayIcon(false); }
+  openSheet($('#coach-backdrop'));
+  $('#coach-loading').hidden = false;
+  $('#coach-content').hidden = true;
+  $('#coach-error').hidden = true;
+  $('#coach-status').textContent = 'Looking at how you played…';
+  try {
+    const result = await askCoach({ song: currentSong, stats }, {
+      provider: getProvider(), apiKey: getApiKey(), model: getAiModel(), signal,
+      onStatus(msg) { if (!signal.aborted) $('#coach-status').textContent = msg; },
+    });
+    if (signal.aborted) return;
+    coachPlan = result.plan;
+    $('#coach-message').textContent = result.message;
+    $('#coach-plan-label').textContent = result.plan.label;
+    $('#coach-loading').hidden = true;
+    $('#coach-content').hidden = false;
+  } catch (err) {
+    if (signal.aborted) return;
+    $('#coach-loading').hidden = true;
+    $('#coach-error').textContent = err && err.message ? err.message : 'The coach is unavailable right now.';
+    $('#coach-error').hidden = false;
+  } finally {
+    if (coachCtrl && coachCtrl.signal === signal) coachCtrl = null;
+  }
+}
+$('#btn-coach').addEventListener('click', runCoach);
+$('#coach-apply').addEventListener('click', () => {
+  const plan = coachPlan;
+  closeAllSheets();
+  if (plan) applyPlan(plan);
+});
+
+/* ---------------- MIDI keyboard ---------------- */
+
+let midiConn = null;
+if (midiInputSupported()) {
+  $('#btn-midi').hidden = false;
+  $('#btn-midi').addEventListener('click', async () => {
+    if (midiConn) { midiConn.disconnect(); midiConn = null; $('#btn-midi').classList.remove('active'); toast('MIDI keyboard disconnected.'); return; }
+    try {
+      initEngine();
+      midiConn = await connectMidiInput({
+        onNoteOn: n => { engine.pressKey(n); },
+        onNoteOff: n => { engine.releaseKey(n); },
+        onDevices: names => { if (midiConn) toast(names.length ? `🎹 ${names.join(', ')}` : 'No MIDI keyboard found — plug one in.', 3500); },
+      });
+      $('#btn-midi').classList.add('active');
+      toast(midiConn.devices.length ? `🎹 Connected: ${midiConn.devices.join(', ')}` : 'MIDI enabled — plug in a keyboard and it will just work.', 4000);
+    } catch (err) {
+      console.warn(err);
+      toast('Could not access MIDI devices in this browser.');
+    }
   });
 }
 
@@ -216,6 +395,15 @@ function openPlayer(song, { autoplay = true } = {}) {
   engine.setTranspose(0);
   engine.setSong(song);
   engine.setSpeed(parseFloat($('#speed-select').value) || 1);
+  loopA = null;
+  coachOffered = false;
+  refreshLoopUi();
+  updateLearnStats();
+  showLearnHint(null);
+  if (mode === 'learn') {
+    const hands = document.querySelector('#hands-seg .seg-btn.active')?.dataset.hands || 'both';
+    engine.setLearn(true, { hands, hints: $('#hints-toggle').checked });
+  }
   showScreen('player');
   if (autoplay) {
     synth.unlock().then(() => { engine.play(); setPlayIcon(true); });
@@ -551,19 +739,181 @@ async function findAndPlay(input, { rawTitle = '' } = {}) {
   showCandidates(result);
 }
 
-$('#match-listen').addEventListener('click', () => {
+$('#match-exact').addEventListener('click', () => {
   closeSheet($('#sheet-backdrop'));
-  openListenSheet();
+  openExactSheet();
 });
 
 function checkShareTarget() {
   const params = new URLSearchParams(location.search);
   const shared = parseSharedParams(params);
-  if (params.has('title') || params.has('text') || params.has('url')) {
+  const sharedFile = params.has('shared-file');
+  if (params.has('title') || params.has('text') || params.has('url') || sharedFile || params.has('share-error')) {
     history.replaceState(null, '', location.pathname);
   }
+  if (params.has('share-error')) toast('That share could not be read — try again or pick the file from inside Pianiol.');
+  if (sharedFile) { loadSharedFile(); return; }
   if (shared) findAndPlay(shared.videoUrl || shared.rawTitle, { rawTitle: shared.rawTitle });
 }
+
+// A file shared into Pianiol arrives via the service worker's cache (see sw.js).
+async function loadSharedFile() {
+  try {
+    const cache = await caches.open('pianiol-share');
+    const res = await cache.match('shared-media');
+    if (!res) { toast('The shared file was not found — please share it again.'); return; }
+    const blob = await res.blob();
+    const name = decodeURIComponent(res.headers.get('x-file-name') || 'Shared audio');
+    await cache.delete('shared-media');
+    openExactSheet();
+    await transcribeBlob(blob, name);
+  } catch (err) {
+    console.warn(err);
+    toast('Could not read the shared file.');
+  }
+}
+
+/* ---------------- exact notes from audio ---------------- */
+
+let exactCtrl = null;
+let capture = null;
+let captureTimer = 0;
+
+function cancelExact() {
+  if (exactCtrl) { exactCtrl.abort(); exactCtrl = null; }
+  if (capture && capture.running) { capture.stop().catch(() => {}); }
+  capture = null;
+  clearInterval(captureTimer);
+}
+
+function exactView(which) {
+  $('#exact-choose').hidden = which !== 'choose';
+  $('#exact-record').hidden = which !== 'record';
+  $('#exact-progress').hidden = which !== 'progress';
+  $('#exact-error').hidden = true;
+}
+
+function exactError(msg) {
+  exactView('choose');
+  $('#exact-error').textContent = msg;
+  $('#exact-error').hidden = false;
+}
+
+function openExactSheet() {
+  cancelExact();
+  openSheet($('#exact-backdrop'));
+  exactView('choose');
+  $('#exact-tab').hidden = !(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+  if (!mlSupported()) exactError('This browser cannot run the pitch-detection model.');
+}
+
+$('#btn-exact').addEventListener('click', openExactSheet);
+$('#exact-file').addEventListener('click', () => $('#audio-file').click());
+$('#audio-file').addEventListener('change', async e => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  if ($('#exact-backdrop').hidden) openExactSheet();
+  await transcribeBlob(file, file.name);
+});
+
+async function transcribeBlob(blob, name) {
+  cancelExact();
+  exactCtrl = new AbortController();
+  const { signal } = exactCtrl;
+  exactView('progress');
+  setExactProgress('Decoding the audio…', 0);
+  try {
+    const samples = await decodeFile(blob, { maxSeconds: 360 });
+    if (signal.aborted) return;
+    await transcribeAndOpen(samples, { title: String(name || 'Audio').replace(/\.[a-z0-9]{2,5}$/i, ''), signal });
+  } catch (err) {
+    if (signal.aborted) return;
+    console.warn(err);
+    exactError(err && err.message ? err.message : 'Could not transcribe that file.');
+  }
+}
+
+function setExactProgress(msg, pct) {
+  $('#exact-status').textContent = msg;
+  if (typeof pct === 'number') $('#exact-bar').style.width = `${Math.max(0, Math.min(100, pct))}%`;
+}
+
+async function transcribeAndOpen(samples, { title, signal }) {
+  const song = await transcribeSamples(samples, {
+    title,
+    signal,
+    onStatus(msg) { if (!signal.aborted) setExactProgress(msg); },
+    onProgress(p) { if (!signal.aborted) setExactProgress(`Listening for notes… ${p}%`, p); },
+  });
+  if (signal.aborted) return;
+  lastResolve = null;
+  openPlayer(song);
+  toast(`🎧 ${song.notes.length} notes found in the recording · ${instrumentName(synth.instrument)}`, 4500);
+}
+
+async function startCapture(kind) {
+  cancelExact();
+  exactCtrl = new AbortController();
+  const { signal } = exactCtrl;
+  let stream;
+  try {
+    stream = kind === 'tab' ? await getTabStream() : await getMicStream();
+  } catch (err) {
+    if (signal.aborted) return;
+    const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+    exactError(denied
+      ? (kind === 'tab' ? 'Screen/tab sharing was cancelled.' : 'Microphone access was blocked — allow it and try again.')
+      : (err && err.message) || 'Could not start capturing audio.');
+    return;
+  }
+  if (signal.aborted) { for (const t of stream.getTracks()) t.stop(); return; }
+  capture = new AudioCapture();
+  exactView('record');
+  $('#exact-record-hint').textContent = kind === 'tab'
+    ? 'Recording the tab. Play the video now, then stop when it\'s done (or after the part you want).'
+    : 'Recording. Play the song out loud now, then stop when it\'s done.';
+  $('#exact-timer').textContent = '0:00';
+  $('#exact-level').style.width = '0%';
+  try {
+    await capture.start(stream, {
+      maxSeconds: 360,
+      onLevel(rms, secs) {
+        $('#exact-level').style.width = `${Math.min(100, rms * 300)}%`;
+        $('#exact-timer').textContent = fmtTime(secs);
+      },
+    });
+  } catch (err) {
+    console.warn(err);
+    exactError('Could not start recording in this browser.');
+  }
+  // Tab capture ends when the user stops sharing from the browser bar.
+  for (const t of stream.getTracks()) t.addEventListener('ended', () => { if (capture && capture.running) finishCapture(); });
+}
+
+async function finishCapture() {
+  if (!capture || !capture.running) return;
+  const cap = capture;
+  const signal = exactCtrl ? exactCtrl.signal : new AbortController().signal;
+  exactView('progress');
+  setExactProgress('Preparing the recording…', 0);
+  let samples = null;
+  try { samples = await cap.stop(); } catch (err) { console.warn(err); }
+  capture = null;
+  if (signal.aborted) return;
+  if (!samples || samples.length < 22050) { exactError('The recording was too short — try again and stop after the song has played.'); return; }
+  try {
+    await transcribeAndOpen(samples, { title: 'Recorded audio', signal });
+  } catch (err) {
+    if (signal.aborted) return;
+    console.warn(err);
+    exactError(err && err.message ? err.message : 'Could not transcribe the recording.');
+  }
+}
+
+$('#exact-tab').addEventListener('click', () => startCapture('tab'));
+$('#exact-mic').addEventListener('click', () => startCapture('mic'));
+$('#exact-stop').addEventListener('click', finishCapture);
 
 /* ---------------- listen mode ---------------- */
 
@@ -580,8 +930,6 @@ function openListenSheet() {
   $('#btn-record-done').hidden = true;
   heardCount = 0;
 }
-
-$('#btn-listen').addEventListener('click', openListenSheet);
 
 $('#btn-record').addEventListener('click', async () => {
   if (transcriber.running) return;
@@ -649,6 +997,9 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW registration failed', err));
   });
 }
+
+// Small debug/testing hook (read-only).
+window.__pianiol = { get engine() { return engine; }, get mode() { return mode; }, get song() { return currentSong; } };
 
 renderLibrary();
 checkShareTarget();
