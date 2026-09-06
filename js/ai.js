@@ -101,10 +101,10 @@ What to write:
 If the request is vague or names a video rather than a song, pick the most likely piece it refers to and transcribe that.`;
 
 // Providers without structured outputs get the format spelled out and must answer with bare JSON.
-const JSON_ONLY_SUFFIX = `
-
-Answer with ONLY a JSON object — no prose before or after it, no markdown fences — shaped exactly like this example:
-{"title":"Twinkle Twinkle Little Star","artist":"Traditional","bpm":100,"beatsPerBar":4,"confidence":"high","notes":["0 1 C4 1","1 1 C4 1","2 1 G4 1","0 2 C3 0","2 2 E3 0"]}`;
+const SONG_EXAMPLE = '{"title":"Twinkle Twinkle Little Star","artist":"Traditional","bpm":100,"beatsPerBar":4,"confidence":"high","notes":["0 1 C4 1","1 1 C4 1","2 1 G4 1","0 2 C3 0","2 2 E3 0"]}';
+function jsonOnlySuffix(example) {
+  return `\n\nAnswer with ONLY a JSON object — no prose before or after it, no markdown fences — shaped exactly like this example:\n${example}`;
+}
 
 const SONG_SCHEMA = {
   type: 'object',
@@ -244,14 +244,14 @@ function progressReporter(onStatus) {
 /* Anthropic (Claude)                                                  */
 /* ------------------------------------------------------------------ */
 
-async function composeAnthropic(song, { apiKey, model, signal, onStatus }) {
+async function requestAnthropic({ system, user, schema, maxTokens }, { apiKey, model, signal, onStatus }) {
   const body = {
     model,
-    max_tokens: 16000,
+    max_tokens: maxTokens,
     stream: true,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: userMessage(song) }],
-    output_config: { effort: 'high', format: { type: 'json_schema', schema: SONG_SCHEMA } },
+    system,
+    messages: [{ role: 'user', content: user }],
+    output_config: { effort: 'high', format: { type: 'json_schema', schema } },
   };
   // Server-side refusal fallbacks route a declined request to another model in the same call.
   if (model === 'claude-opus-5') body.fallbacks = 'default';
@@ -306,16 +306,17 @@ export async function resolveOpenRouterModel(wanted, { signal } = {}) {
   return scored.length ? scored[0].id : null;
 }
 
-async function composeOpenRouter(song, { apiKey, model, signal, onStatus }, _retried = false) {
+async function requestOpenRouter(req, { apiKey, model, signal, onStatus }, _retried = false) {
+  const { system, user, jsonExample, maxTokens } = req;
   const body = {
     model,
     stream: true,
-    max_tokens: 12000,
+    max_tokens: maxTokens,
     temperature: 0,
     messages: [
       // "detailed thinking off" is Nemotron's switch for direct answers; harmless for other models.
-      { role: 'system', content: 'detailed thinking off\n\n' + SYSTEM_PROMPT + JSON_ONLY_SUFFIX },
-      { role: 'user', content: userMessage(song) },
+      { role: 'system', content: 'detailed thinking off\n\n' + system + jsonOnlySuffix(jsonExample) },
+      { role: 'user', content: user },
     ],
   };
   const headers = {
@@ -334,7 +335,7 @@ async function composeOpenRouter(song, { apiKey, model, signal, onStatus }, _ret
       const found = await resolveOpenRouterModel(model, { signal });
       if (found && found !== model) {
         setAiModel(found, 'openrouter');
-        return composeOpenRouter(song, { apiKey, model: found, signal, onStatus }, true);
+        return requestOpenRouter(req, { apiKey, model: found, signal, onStatus }, true);
       }
     }
     throw new Error(friendlyError(res.status, parsed, 'OpenRouter'));
@@ -358,25 +359,34 @@ async function composeOpenRouter(song, { apiKey, model, signal, onStatus }, _ret
 /* Compose                                                             */
 /* ------------------------------------------------------------------ */
 
-// Ask the configured AI for the notes of a song. Returns a runtime song (engine
-// format) with .artist, .confidence and .aiModel set. Throws with a friendly message.
-export async function composeSong(song, { provider, apiKey, model, signal, onStatus } = {}) {
+// Generic "ask the configured AI for a JSON object" — used for songs and for coaching.
+// req: { system, user, schema, jsonExample, maxTokens }. Returns { data, text, servedBy }.
+export async function askJson(req, { provider, apiKey, model, signal, onStatus } = {}) {
   const prov = provider || getProvider();
   const key = apiKey || getApiKey(prov);
   if (!key) throw new Error('No API key set.');
   const useModel = model || getAiModel(prov);
-
-  onStatus && onStatus('Asking AI to write the notes…');
-  const run = prov === 'openrouter' ? composeOpenRouter : composeAnthropic;
-  const { text, servedBy } = await run(song, { apiKey: key, model: useModel, signal, onStatus });
-
-  let libSong;
+  const run = prov === 'openrouter' ? requestOpenRouter : requestAnthropic;
+  const { text, servedBy } = await run({ maxTokens: 4000, ...req }, { apiKey: key, model: useModel, signal, onStatus });
+  let data;
   try {
-    libSong = parseAiSong(text, song.title);
-  } catch (err) {
-    if (err instanceof SyntaxError) throw new Error('The AI reply was cut off or not in the expected format — please try again.');
-    throw err;
+    data = extractJson(text);
+  } catch {
+    throw new Error('The AI reply was cut off or not in the expected format — please try again.');
   }
+  return { data, text, servedBy, provider: prov };
+}
+
+// Ask the configured AI for the notes of a song. Returns a runtime song (engine
+// format) with .artist, .confidence and .aiModel set. Throws with a friendly message.
+export async function composeSong(song, { provider, apiKey, model, signal, onStatus } = {}) {
+  const prov = provider || getProvider();
+  onStatus && onStatus('Asking AI to write the notes…');
+  const { data, servedBy } = await askJson(
+    { system: SYSTEM_PROMPT, user: userMessage(song), schema: SONG_SCHEMA, jsonExample: SONG_EXAMPLE, maxTokens: prov === 'openrouter' ? 12000 : 16000 },
+    { provider: prov, apiKey, model, signal, onStatus },
+  );
+  const libSong = parseAiSong(data, song.title);
   const out = songToNotes(libSong);
   out.artist = libSong.artist ? `${libSong.artist} · written by AI` : 'written by AI';
   out.confidence = libSong.confidence;

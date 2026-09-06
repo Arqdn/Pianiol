@@ -14,6 +14,15 @@ const MAX_PARTICLES = 120;
 const FLASH_MS = 250;
 const PARTICLE_MS = 500;
 const MIN_NOTE_H = 14;
+const CHORD_TOL = 0.06;       // notes starting within this window count as one chord (learn mode)
+const EARLY_WINDOW = 0.25;    // pressing a key this early before its note still counts (learn mode)
+const WRONG_MS = 300;         // red flash after a wrong key
+
+// Key highlight states beyond the two hands: 4 = target key (learn mode), 5 = wrong key.
+const TARGET_KEY = 'rgba(255,224,102,0.95)';
+const TARGET_GLOW = 'rgba(255,224,102,';
+const WRONG_KEY = 'rgba(255,92,112,0.9)';
+const WRONG_GLOW = 'rgba(255,92,112,';
 
 // Hand palettes: [0] = left (warm orange), [1] = right/melody (teal).
 const HANDS = [
@@ -67,13 +76,29 @@ function bottomRoundRectPath(ctx, x, y, w, h, r) {
 }
 
 export class FallingNotes {
-  constructor({ canvas, synth, onProgress, onEnd, onUserNote }) {
+  constructor({ canvas, synth, onProgress, onEnd, onUserNote, onWait, onLearnEvent }) {
     this._canvas = canvas;
     this._ctx = canvas.getContext('2d');
     this._synth = synth;
     this._onProgress = typeof onProgress === 'function' ? onProgress : null;
     this._onEnd = typeof onEnd === 'function' ? onEnd : null;
     this._onUserNote = typeof onUserNote === 'function' ? onUserNote : null;
+    this._onWait = typeof onWait === 'function' ? onWait : null;
+    this._onLearnEvent = typeof onLearnEvent === 'function' ? onLearnEvent : null;
+
+    // Learn mode ------------------------------------------------------------
+    this._learn = false;
+    this._learnHands = 3;        // bitmask: 1 = left hand (hand 0), 2 = right hand (hand 1)
+    this._hints = true;
+    this._waiting = false;       // transport frozen until the target keys are played
+    this._targets = new Set();   // display midis still to be played in the current chord
+    this._targetIdx = [];        // note indices in the current chord
+    this._learnIndex = 0;        // next practised note to wait for
+    this._waitStartedAt = 0;
+    this._earlyHits = new Set(); // keys pressed just before their note
+    this._wrongFlash = new Map();// midi -> performance.now() of a wrong press
+    this._loop = null;           // {start, end} seconds
+    this._stats = this._freshStats();
 
     // Song / timing state -------------------------------------------------
     this._song = null;
@@ -194,6 +219,10 @@ export class FallingNotes {
     }
     this._schedIndex = 0;
     this._hitIndex = 0;
+    this._clearWait();
+    this._loop = null;
+    this._stats = this._freshStats();
+    this._syncLearnIndex(0);
     this._computeRange();
     this._buildKeys();
     this._dirty = true;
@@ -219,6 +248,7 @@ export class FallingNotes {
     if (this._state !== 'playing') return;
     this._songTime = this.time;
     this._state = 'paused';
+    this._clearWait();
     this._synth.allOff?.();
     this._dirty = true;
   }
@@ -251,13 +281,203 @@ export class FallingNotes {
     const s = clamp(+mult || 1, 0.25, 2);
     if (s === this._speed) return;
     // Re-anchor at the current instant so there is no time jump.
-    if (this._state === 'playing') {
+    if (this._state === 'playing' && !this._waiting) {
       this._songTime = this.time;
       this._anchorSongTime = this._songTime;
       this._anchorCtxTime = this._synth.currentTime;
     }
     this._speed = s;
     this._dirty = true;
+  }
+
+  // ---- Learn mode --------------------------------------------------------
+
+  // on: wait at every note of the practised hand(s) until the user plays it.
+  setLearn(on, { hands, hints } = {}) {
+    if (hands !== undefined) this._learnHands = FallingNotes._handMask(hands);
+    if (hints !== undefined) this._hints = !!hints;
+    const was = this._learn;
+    this._learn = !!on;
+    if (was && !this._learn && this._waiting) this._resumeFromWait();
+    this._syncLearnIndex(this.time);
+    this._dirty = true;
+  }
+
+  setLearnHands(hands) {
+    this._learnHands = FallingNotes._handMask(hands);
+    if (this._waiting) this._resumeFromWait(false); // the frame re-waits if still needed
+    this._syncLearnIndex(this.time);
+    this._dirty = true;
+  }
+
+  setHints(on) { this._hints = !!on; this._dirty = true; }
+
+  // Repeat [startSec, endSec) while playing (learn or listen mode).
+  setLoop(startSec, endSec) {
+    const a = clamp(+startSec || 0, 0, this._duration);
+    const b = clamp(+endSec || 0, 0, this._duration);
+    if (b - a < 0.5) { this._loop = null; return; }
+    this._loop = { start: a, end: b };
+    this._dirty = true;
+  }
+  clearLoop() { this._loop = null; this._dirty = true; }
+  get loop() { return this._loop ? { ...this._loop } : null; }
+
+  get learn() { return this._learn; }
+  get waiting() { return this._waiting; }
+  get targets() { return [...this._targets].map(m => ({ midi: m, name: midiName(m) })); }
+
+  resetStats() { this._stats = this._freshStats(); }
+
+  // Practice summary for the coach / UI.
+  get stats() {
+    const s = this._stats;
+    const total = s.hits + s.misses;
+    const bars = Object.keys(s.bars).map(k => {
+      const b = s.bars[k];
+      const range = this._barRange(+k);
+      return { bar: +k + 1, hits: b.hits, misses: b.misses, accuracy: b.hits + b.misses ? b.hits / (b.hits + b.misses) : 1, startSec: range.start, endSec: range.end };
+    }).sort((x, y) => x.accuracy - y.accuracy || y.misses - x.misses);
+    const wrong = Object.keys(s.wrong).map(k => ({ midi: +k, name: midiName(+k), count: s.wrong[k] })).sort((a, b) => b.count - a.count).slice(0, 5);
+    const react = s.reaction.length ? s.reaction.reduce((a, b) => a + b, 0) / s.reaction.length : 0;
+    return {
+      hits: s.hits, misses: s.misses, early: s.early, loops: s.loops,
+      accuracy: total ? s.hits / total : 1,
+      avgReactionMs: Math.round(react),
+      wrongKeys: wrong,
+      worstBars: bars.slice(0, 4),
+      hands: this._learnHands === 3 ? 'both' : this._learnHands === 2 ? 'right' : 'left',
+      speed: this._speed,
+      barSeconds: this._barSeconds(),
+      practisedSeconds: Math.round((performance.now() - s.startedAt) / 1000),
+    };
+  }
+
+  static _handMask(hands) {
+    if (hands === 'right' || hands === 1) return 2;
+    if (hands === 'left' || hands === 0) return 1;
+    return 3;
+  }
+
+  _freshStats() {
+    return { hits: 0, misses: 0, early: 0, loops: 0, reaction: [], wrong: {}, bars: {}, startedAt: performance.now() };
+  }
+
+  _barSeconds() {
+    const bpm = this._song && this._song.bpm;
+    if (bpm && bpm > 0) return (this._song.beatsPerBar || 4) * 60 / bpm;
+    return 4; // no tempo known: 4-second sections
+  }
+  _barOf(t) { return Math.max(0, Math.floor((t - 0.5) / this._barSeconds())); } // songs start at 0.5s
+  _barRange(bar) { const s = this._barSeconds(); return { start: 0.5 + bar * s, end: 0.5 + (bar + 1) * s }; }
+
+  _practised(nt) {
+    return ((nt.hand === 0 ? 1 : 2) & this._learnHands) !== 0;
+  }
+
+  // Point _learnIndex at the first practised note at or after t.
+  _syncLearnIndex(t) {
+    if (!this._times) { this._learnIndex = 0; return; }
+    let i = this._lowerBound(t - 0.001);
+    while (i < this._notes.length && !this._practised(this._notes[i])) i++;
+    this._learnIndex = i;
+  }
+
+  // Display midis of the chord starting at note index i.
+  _chordMidis(i) {
+    const out = [];
+    if (i >= this._notes.length) return out;
+    const t0 = this._times[i];
+    for (let j = i; j < this._notes.length && this._times[j] <= t0 + CHORD_TOL; j++) {
+      if (this._practised(this._notes[j])) out.push(j);
+    }
+    return out;
+  }
+
+  _enterWait() {
+    const idx = this._chordMidis(this._learnIndex);
+    if (!idx.length) return;
+    this._songTime = this._times[idx[0]];
+    this._waiting = true;
+    this._waitStartedAt = performance.now();
+    this._targets.clear();
+    this._targetIdx = idx;
+    for (const j of idx) this._targets.add(this._notes[j].midi + this._transpose);
+    // Keys pressed a moment early count.
+    for (const m of this._earlyHits) {
+      if (this._targets.has(m)) { this._targets.delete(m); this._recordHit(m, 0, true); }
+    }
+    this._earlyHits.clear();
+    // Advance past this chord (whatever follows in the same window is done too).
+    let next = idx[idx.length - 1] + 1;
+    while (next < this._notes.length && !this._practised(this._notes[next])) next++;
+    this._learnIndex = next;
+    this._dirty = true;
+    if (this._targets.size === 0) { this._resumeFromWait(); return; }
+    if (this._onWait) this._onWait(this.targets);
+  }
+
+  _clearWait() {
+    this._waiting = false;
+    this._targets.clear();
+    this._targetIdx = [];
+    this._earlyHits.clear();
+  }
+
+  _resumeFromWait(notify = true) {
+    if (!this._waiting) return;
+    for (const j of this._targetIdx) if (this._scheduled) this._scheduled[j] = 1;
+    this._clearWait();
+    this._anchorSongTime = this._songTime;
+    this._anchorCtxTime = this._synth.currentTime;
+    this._dirty = true;
+    if (notify && this._onWait) this._onWait(null);
+  }
+
+  _recordHit(midi, reactionMs, early) {
+    const s = this._stats;
+    s.hits++;
+    if (early) s.early++; else s.reaction.push(reactionMs);
+    const bar = this._barOf(this._songTime);
+    (s.bars[bar] = s.bars[bar] || { hits: 0, misses: 0 }).hits++;
+    const geom = this._keyByMidi[midi];
+    if (geom) this._spawnHit(geom, 1);
+    if (this._onLearnEvent) this._onLearnEvent({ type: 'hit', midi, reactionMs, early: !!early });
+  }
+
+  _recordMiss(midi) {
+    const s = this._stats;
+    s.misses++;
+    s.wrong[midi] = (s.wrong[midi] || 0) + 1;
+    const bar = this._barOf(this._songTime);
+    (s.bars[bar] = s.bars[bar] || { hits: 0, misses: 0 }).misses++;
+    this._wrongFlash.set(midi, performance.now());
+    if (this._onLearnEvent) this._onLearnEvent({ type: 'miss', midi, expected: this.targets });
+  }
+
+  // A user key press seen through learn mode. Returns true if it was consumed as a hit/miss.
+  _learnPress(m) {
+    if (!this._learn || this._state !== 'playing') return false;
+    if (this._waiting) {
+      if (this._targets.has(m)) {
+        this._targets.delete(m);
+        this._recordHit(m, performance.now() - this._waitStartedAt, false);
+        if (this._targets.size === 0) this._resumeFromWait();
+      } else {
+        this._recordMiss(m);
+      }
+      return true;
+    }
+    // Slightly early press for the upcoming chord.
+    if (this._learnIndex < this._notes.length) {
+      const tt = this._times[this._learnIndex];
+      if (tt - this.time <= EARLY_WINDOW) {
+        for (const j of this._chordMidis(this._learnIndex)) {
+          if (this._notes[j].midi + this._transpose === m) { this._earlyHits.add(m); return true; }
+        }
+      }
+    }
+    return false;
   }
 
   setTranspose(semitones) {
@@ -272,7 +492,7 @@ export class FallingNotes {
   get state() { return this._state; }
 
   get time() {
-    if (this._state === 'playing') {
+    if (this._state === 'playing' && !this._waiting) {
       return this._anchorSongTime + (this._synth.currentTime - this._anchorCtxTime) * this._speed;
     }
     return this._songTime;
@@ -316,6 +536,7 @@ export class FallingNotes {
     this._synth.unlock();
     this._userDown.add(m);
     this._synth.noteOn(m, 0.85);
+    this._learnPress(m);
     this._dirty = true;
   }
 
@@ -344,6 +565,7 @@ export class FallingNotes {
   }
 
   _resetScheduling(t) {
+    this._clearWait();
     if (!this._scheduled) return;
     const idx = this._lowerBound(t);
     // Notes before t are treated as already played; notes at/after t are pending.
@@ -351,17 +573,21 @@ export class FallingNotes {
     this._scheduled.fill(0, idx);
     this._schedIndex = idx;
     this._hitIndex = idx;
+    this._syncLearnIndex(t);
   }
 
   _scheduleAudio(songTime) {
     const notes = this._notes;
     const n = notes.length;
-    const horizon = songTime + LOOKAHEAD;
+    let horizon = songTime + LOOKAHEAD;
+    // Learn mode: never schedule past the next note the user has to play.
+    if (this._learn && this._learnIndex < n) horizon = Math.min(horizon, this._times[this._learnIndex]);
     while (this._schedIndex < n && this._times[this._schedIndex] < horizon) {
       const i = this._schedIndex++;
       if (this._scheduled[i]) continue;
       this._scheduled[i] = 1;
       const nt = notes[i];
+      if (this._learn && this._practised(nt)) continue; // the user plays these
       const when = this._anchorCtxTime + (nt.time - this._anchorSongTime) / this._speed;
       const dur = Math.max(0.02, (nt.duration || 0.05) / this._speed);
       const vel = (typeof nt.velocity === 'number') ? clamp(nt.velocity, 0.02, 1) : 0.8;
@@ -374,6 +600,7 @@ export class FallingNotes {
     const n = notes.length;
     while (this._hitIndex < n && this._times[this._hitIndex] <= songTime) {
       const nt = notes[this._hitIndex++];
+      if (this._learn && this._practised(nt)) continue; // flashed when the user hits it
       const geom = this._keyByMidi[nt.midi + this._transpose];
       if (geom) this._spawnHit(geom, (nt.hand === 0) ? 0 : 1);
     }
@@ -559,12 +786,32 @@ export class FallingNotes {
     if (this._destroyed) return;
     this._raf = requestAnimationFrame(this._onFrame);
 
-    const playing = this._state === 'playing';
+    const playing = this._state === 'playing' && !this._waiting;
     let songTime = this.time;
 
     if (playing) {
-      this._scheduleAudio(songTime);
-      this._advanceHits(songTime);
+      // Loop section
+      if (this._loop && songTime >= this._loop.end) {
+        this._stats.loops++;
+        this.seek(this._loop.start);
+        if (this._onLearnEvent) this._onLearnEvent({ type: 'loop', count: this._stats.loops });
+        songTime = this.time;
+      }
+
+      // Learn mode: freeze at the next note the user must play.
+      if (this._learn && this._learnIndex < this._notes.length && songTime >= this._times[this._learnIndex] - 0.004) {
+        this._scheduleAudio(songTime);
+        this._advanceHits(this._times[this._learnIndex]);
+        this._enterWait();
+        songTime = this.time;
+      }
+    }
+
+    if (this._state === 'playing') {
+      if (!this._waiting) {
+        this._scheduleAudio(songTime);
+        this._advanceHits(songTime);
+      }
 
       // Progress callback ~4x/sec
       const now = performance.now();
@@ -574,7 +821,7 @@ export class FallingNotes {
       }
 
       // End of song
-      if (!this._endFired && songTime > this._lastEnd + 1) {
+      if (!this._waiting && !this._endFired && songTime > this._lastEnd + 1) {
         this._endFired = true;
         this._songTime = clamp(songTime, 0, this._duration);
         this._state = 'paused';
@@ -584,7 +831,16 @@ export class FallingNotes {
       }
     }
 
-    const animating = this._liveParticles > 0 || this._liveFlashes > 0;
+    // Expire wrong-key flashes
+    let wrongAnimating = false;
+    if (this._wrongFlash.size) {
+      const now = performance.now();
+      for (const [m, at] of this._wrongFlash) {
+        if (now - at > WRONG_MS) this._wrongFlash.delete(m); else wrongAnimating = true;
+      }
+    }
+
+    const animating = this._liveParticles > 0 || this._liveFlashes > 0 || wrongAnimating || (this._waiting && this._hints);
     if (!playing && !this._dirty && !animating) return;
     this._dirty = false;
 
@@ -665,6 +921,26 @@ export class FallingNotes {
     for (const m of this._userDown) {
       if (m >= 0 && m < 128) ks[m] = 3;
     }
+    // ---- Learn mode: target keys (hints) and wrong presses ---------------
+    if (this._waiting && this._hints) {
+      for (const m of this._targets) if (m >= 0 && m < 128) ks[m] = 4;
+    }
+    for (const m of this._wrongFlash.keys()) if (m >= 0 && m < 128) ks[m] = 5;
+
+    // ---- Loop region shading --------------------------------------------
+    if (this._loop && pps > 0) {
+      const y1 = kbTop - (this._loop.end - songTime) * pps;
+      const y0 = kbTop - (this._loop.start - songTime) * pps;
+      const top = Math.max(0, Math.min(y0, y1));
+      const bottom = Math.min(kbTop, Math.max(y0, y1));
+      if (bottom > top) {
+        ctx.fillStyle = 'rgba(255,224,102,0.05)';
+        ctx.fillRect(0, top, w, bottom - top);
+        ctx.fillStyle = 'rgba(255,224,102,0.35)';
+        if (y0 >= 0 && y0 <= kbTop) ctx.fillRect(0, y0 - 1, w, 2);
+        if (y1 >= 0 && y1 <= kbTop) ctx.fillRect(0, y1 - 1, w, 2);
+      }
+    }
 
     // ---- Hit line --------------------------------------------------------
     ctx.save();
@@ -679,6 +955,37 @@ export class FallingNotes {
 
     // ---- Hit flashes + particles ----------------------------------------
     this._drawEffects(ctx, kbTop);
+
+    // ---- Learn-mode hint badges above the target keys --------------------
+    if (this._waiting && this._hints && this._targets.size) {
+      const pulse = 0.75 + 0.25 * Math.sin(performance.now() / 180);
+      ctx.font = 'bold 11px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (const m of this._targets) {
+        const g = this._keyByMidi[m];
+        if (!g) continue;
+        const cx = g.x + g.w * 0.5;
+        const label = midiName(m);
+        const bw = Math.max(30, label.length * 8 + 12);
+        const by = kbTop - 30;
+        ctx.globalAlpha = pulse;
+        roundRectPath(ctx, cx - bw * 0.5, by - 10, bw, 20, 10);
+        ctx.fillStyle = TARGET_KEY;
+        ctx.fill();
+        ctx.fillStyle = '#2a2100';
+        ctx.fillText(label, cx, by + 0.5);
+        // little arrow pointing at the key
+        ctx.beginPath();
+        ctx.moveTo(cx - 5, by + 10);
+        ctx.lineTo(cx + 5, by + 10);
+        ctx.lineTo(cx, by + 16);
+        ctx.closePath();
+        ctx.fillStyle = TARGET_KEY;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
 
     // ---- Progress bar ----------------------------------------------------
     if (this._duration > 0) {
@@ -741,7 +1048,7 @@ export class FallingNotes {
       ctx.fill();
       const st = ks[k.midi];
       if (st) {
-        ctx.fillStyle = st === 3 ? 'rgba(255,255,255,0.35)' : HANDS[st - 1].key;
+        ctx.fillStyle = st === 3 ? 'rgba(255,255,255,0.35)' : st === 4 ? TARGET_KEY : st === 5 ? WRONG_KEY : HANDS[st - 1].key;
         ctx.fill();
         this._keyGlow(ctx, k, st, kbTop);
         if (st === 3) {
@@ -767,7 +1074,7 @@ export class FallingNotes {
       ctx.fill();
       const st = ks[k.midi];
       if (st) {
-        ctx.fillStyle = st === 3 ? 'rgba(34,201,214,0.85)' : HANDS[st - 1].key;
+        ctx.fillStyle = st === 3 ? 'rgba(34,201,214,0.85)' : st === 4 ? TARGET_KEY : st === 5 ? WRONG_KEY : HANDS[st - 1].key;
         ctx.fill();
         this._keyGlow(ctx, k, st, kbTop);
       } else {
@@ -779,11 +1086,11 @@ export class FallingNotes {
   }
 
   _keyGlow(ctx, key, st, kbTop) {
-    const pal = HANDS[st === 3 ? 1 : st - 1];
+    const glow = st === 4 ? TARGET_GLOW : st === 5 ? WRONG_GLOW : HANDS[st === 3 ? 1 : st - 1].glow;
     const gh = 46;
     const grad = ctx.createLinearGradient(0, kbTop - gh, 0, kbTop);
-    grad.addColorStop(0, pal.glow + '0)');
-    grad.addColorStop(1, pal.glow + '0.35)');
+    grad.addColorStop(0, glow + '0)');
+    grad.addColorStop(1, glow + '0.35)');
     ctx.fillStyle = grad;
     ctx.fillRect(key.x - 2, kbTop - gh, key.w + 4, gh);
   }

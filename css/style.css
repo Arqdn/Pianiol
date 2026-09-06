@@ -151,7 +151,7 @@ body {
 
 .player-top {
   display: flex; align-items: center; gap: 10px;
-  padding: max(10px, env(safe-area-inset-top)) 12px 10px;
+  padding: max(10px, env(safe-area-inset-top)) 12px 8px;
 }
 .player-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .player-title strong { font-size: .98rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -163,6 +163,56 @@ body {
 
 .canvas-wrap { flex: 1; min-height: 0; position: relative; }
 #stage { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+/* ---------- Play / Learn ---------- */
+.mode-row { display: flex; align-items: center; gap: 8px; padding: 0 12px 8px; flex-wrap: wrap; }
+.segmented { display: inline-flex; background: var(--card); border: 1px solid var(--line); border-radius: 11px; padding: 3px; gap: 2px; }
+.seg-btn {
+  padding: 6px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+  font-size: .82rem; font-weight: 600; cursor: pointer;
+}
+.seg-btn.active { background: var(--card-2); color: var(--text); box-shadow: inset 0 0 0 1px rgba(52,226,226,.35); }
+.btn.small { padding: 6px 10px; font-size: .8rem; border-radius: 9px; }
+.btn.small.active { border-color: var(--teal-2); color: var(--teal); }
+.learn-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 0 12px 8px; font-size: .82rem;
+}
+.check-inline { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: .82rem; }
+.check-inline input { accent-color: var(--teal); }
+.loop-ctl { display: inline-flex; align-items: center; gap: 4px; }
+.stats-chip {
+  margin-left: auto; padding: 4px 10px; border-radius: 99px; font-size: .78rem;
+  background: rgba(52,226,226,.12); color: var(--teal); font-variant-numeric: tabular-nums;
+}
+.learn-hint {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  padding: 8px 16px; border-radius: 99px; font-weight: 700; font-size: .95rem;
+  background: rgba(255,224,102,.95); color: #2a2100; box-shadow: 0 6px 20px rgba(0,0,0,.4);
+  pointer-events: none; white-space: nowrap;
+}
+.learn-hint.done { background: rgba(52,226,226,.9); color: #04222b; }
+
+/* ---------- Exact notes ---------- */
+.exact-choose { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 12px 0; }
+.exact-choose .action-card { flex-direction: row; justify-content: flex-start; text-align: left; gap: 12px; padding: 12px 14px; }
+.exact-choose .action-card > span:not(.action-emoji) { display: block; }
+.exact-choose .action-emoji { font-size: 1.4rem; }
+.exact-choose .action-label { display: block; }
+.exact-choose .action-card { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 12px; }
+.exact-choose .action-emoji { grid-row: 1 / span 2; align-self: center; }
+.exact-progress { display: flex; align-items: center; gap: 12px; padding: 14px 0; }
+.exact-progress-text { flex: 1; }
+.exact-progress-text p { margin: 0 0 8px; color: var(--muted); font-size: .9rem; }
+.progress { height: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 99px; overflow: hidden; }
+.progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--teal-2), var(--teal)); transition: width .2s; }
+
+/* ---------- Coach ---------- */
+.coach-message { font-size: 1rem; line-height: 1.5; margin: 8px 0 14px; }
+.coach-plan {
+  display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; margin-bottom: 12px;
+  background: rgba(255,224,102,.1); border: 1px solid rgba(255,224,102,.35); border-radius: 12px;
+}
 
 .player-bottom {
   display: flex; align-items: center; gap: 10px;

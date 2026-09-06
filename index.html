@@ -39,10 +39,10 @@
       <span class="action-label">Paste a link</span>
       <span class="action-sub">YouTube / TikTok</span>
     </button>
-    <button id="btn-listen" class="action-card">
-      <span class="action-emoji">🎤</span>
-      <span class="action-label">Listen</span>
-      <span class="action-sub">Transcribe by ear</span>
+    <button id="btn-exact" class="action-card">
+      <span class="action-emoji">🎧</span>
+      <span class="action-label">Exact notes</span>
+      <span class="action-sub">From audio or video</span>
     </button>
     <button id="btn-ai" class="action-card">
       <span class="action-emoji">✨</span>
@@ -51,6 +51,7 @@
     </button>
   </div>
   <input id="midi-file" type="file" accept=".mid,.midi,audio/midi,audio/x-midi" hidden>
+  <input id="audio-file" type="file" accept="audio/*,video/*" hidden>
 
   <div id="install-hint" class="install-hint" hidden>
     <div class="install-text">
@@ -88,8 +89,34 @@
     </select>
   </div>
 
+  <div class="mode-row">
+    <div class="segmented" id="mode-seg" role="tablist">
+      <button class="seg-btn active" data-mode="play" role="tab">▶ Play</button>
+      <button class="seg-btn" data-mode="learn" role="tab">🎓 Learn</button>
+    </div>
+    <button id="btn-midi" class="btn small" title="Play along on a MIDI keyboard" hidden>🎹 MIDI keyboard</button>
+    <button id="btn-coach" class="btn small" title="Ask the AI coach what to practise">✨ Coach</button>
+  </div>
+
+  <div id="learn-bar" class="learn-bar" hidden>
+    <div class="segmented" id="hands-seg">
+      <button class="seg-btn active" data-hands="both">Both hands</button>
+      <button class="seg-btn" data-hands="right">Right</button>
+      <button class="seg-btn" data-hands="left">Left</button>
+    </div>
+    <label class="check-inline"><input id="hints-toggle" type="checkbox" checked> Hints</label>
+    <div class="loop-ctl">
+      <button id="loop-a" class="btn small" title="Loop start = here">A</button>
+      <button id="loop-b" class="btn small" title="Loop end = here">B</button>
+      <button id="loop-clear" class="btn small" title="Clear loop" hidden>✕</button>
+      <span id="loop-label" class="muted small"></span>
+    </div>
+    <span id="learn-stats" class="stats-chip">✔ 0 · ✖ 0</span>
+  </div>
+
   <div class="canvas-wrap">
     <canvas id="stage"></canvas>
+    <div id="learn-hint" class="learn-hint" hidden></div>
   </div>
 
   <div class="player-bottom">
@@ -133,9 +160,9 @@
       </form>
       <div id="match-list" class="match-list"></div>
       <div class="match-fallback">
-        <p class="muted">Not the right one?</p>
+        <p class="muted">Want the exact notes from the actual recording?</p>
         <div class="fallback-btns">
-          <button id="match-listen" class="btn">🎤 Listen &amp; transcribe</button>
+          <button id="match-exact" class="btn btn-primary">🎧 Exact notes from audio</button>
           <button id="match-import" class="btn">📂 Import a MIDI</button>
         </div>
       </div>
@@ -187,6 +214,70 @@
         <button id="ai-remove-key" class="btn" type="button">Remove key</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- ============ EXACT NOTES (AUDIO) SHEET ============ -->
+<div id="exact-backdrop" class="sheet-backdrop" hidden>
+  <div class="sheet" role="dialog" aria-modal="true">
+    <button class="sheet-close" data-close-sheet title="Close">✕</button>
+    <h3>🎧 Exact notes from audio</h3>
+    <p class="muted">A pitch-detection model listens to the actual recording and writes down every note it hears — melody and accompaniment. Everything runs on this device.</p>
+    <div id="exact-choose" class="exact-choose">
+      <button id="exact-file" class="action-card">
+        <span class="action-emoji">📁</span>
+        <span class="action-label">Audio or video file</span>
+        <span class="action-sub">MP3, WAV, M4A, MP4… or share one from your gallery</span>
+      </button>
+      <button id="exact-tab" class="action-card">
+        <span class="action-emoji">🖥️</span>
+        <span class="action-label">Capture this computer's audio</span>
+        <span class="action-sub">Pick the tab playing the video and tick "Share tab audio"</span>
+      </button>
+      <button id="exact-mic" class="action-card">
+        <span class="action-emoji">🎤</span>
+        <span class="action-label">Microphone</span>
+        <span class="action-sub">Play the song out loud near your phone</span>
+      </button>
+    </div>
+    <div id="exact-record" class="listen-viz" hidden>
+      <div id="exact-timer" class="listen-note">0:00</div>
+      <div class="level-meter"><div id="exact-level" class="level-fill"></div></div>
+      <p id="exact-record-hint" class="muted">Recording… play the song now, then stop when it's done (or after the part you want).</p>
+      <button id="exact-stop" class="btn btn-primary">■ Stop &amp; find the notes</button>
+    </div>
+    <div id="exact-progress" class="exact-progress" hidden>
+      <div class="spinner small"></div>
+      <div class="exact-progress-text">
+        <p id="exact-status">Loading the pitch-detection model…</p>
+        <div class="progress"><div id="exact-bar" class="progress-fill"></div></div>
+      </div>
+    </div>
+    <p id="exact-error" class="error-text" hidden></p>
+  </div>
+</div>
+
+<!-- ============ COACH SHEET ============ -->
+<div id="coach-backdrop" class="sheet-backdrop" hidden>
+  <div class="sheet" role="dialog" aria-modal="true">
+    <button class="sheet-close" data-close-sheet title="Close">✕</button>
+    <h3>✨ Your coach</h3>
+    <div id="coach-loading" class="match-loading">
+      <div class="spinner small"></div>
+      <p id="coach-status">Looking at how you played…</p>
+    </div>
+    <div id="coach-content" hidden>
+      <p id="coach-message" class="coach-message"></p>
+      <div class="coach-plan">
+        <span class="muted small">Next up</span>
+        <strong id="coach-plan-label"></strong>
+      </div>
+      <div class="fallback-btns">
+        <button id="coach-apply" class="btn btn-primary">▶ Do it</button>
+        <button class="btn" data-close-sheet>Keep going as is</button>
+      </div>
+    </div>
+    <p id="coach-error" class="error-text" hidden></p>
   </div>
 </div>
 
