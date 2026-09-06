@@ -9,7 +9,7 @@ import { resolve, loadCandidate } from './finder.js';
 import {
   PROVIDERS, AI_MODELS, OPENROUTER_DEFAULT_MODEL,
   getProvider, setProvider, detectProvider, applySetupParams,
-  getApiKey, setApiKey, hasApiKey, getAiModel, setAiModel,
+  getApiKey, setApiKey, hasApiKey, isBuiltInKey, getAiModel, setAiModel,
 } from './ai.js';
 import { Transcriber } from './transcribe.js';
 import { isSupported as mlSupported, decodeFile, AudioCapture, getMicStream, getTabStream, transcribeSamples } from './transcribe-ml.js';
@@ -111,14 +111,17 @@ const PROVIDER_NOTES = {
 function refreshAiUi() {
   const provider = getProvider();
   const has = hasApiKey(provider);
+  const builtIn = isBuiltInKey(provider);
   $('#ai-card-sub').textContent = has ? `Ready · ${providerLabel(provider)}` : 'Set up';
   $('#btn-ai').classList.toggle('ready', has);
   $('#ai-provider-select').value = provider;
-  $('#ai-key-status').textContent = has
-    ? `${providerLabel(provider)} key saved: ${maskKey(getApiKey(provider))}`
-    : `No ${providerLabel(provider)} key saved yet.`;
+  $('#ai-key-status').textContent = builtIn
+    ? 'Using the built-in OpenRouter key — nothing to set up. Paste your own key to use it instead.'
+    : has
+      ? `${providerLabel(provider)} key saved: ${maskKey(getApiKey(provider))}`
+      : `No ${providerLabel(provider)} key saved yet.`;
   $('#ai-key-input').value = '';
-  $('#ai-key-input').placeholder = has ? 'Paste a new key to replace it' : (provider === 'openrouter' ? 'sk-or-…' : 'sk-ant-…');
+  $('#ai-key-input').placeholder = has && !builtIn ? 'Paste a new key to replace it' : (provider === 'openrouter' ? 'sk-or-…' : 'sk-ant-…');
   const isOr = provider === 'openrouter';
   $('#ai-model-select').hidden = isOr;
   $('#ai-or-model-input').hidden = !isOr;
@@ -126,7 +129,7 @@ function refreshAiUi() {
   else $('#ai-model-select').value = getAiModel('anthropic');
   $('#ai-provider-note').textContent = PROVIDER_NOTES[provider];
   $('#ai-online-toggle').checked = onlineEnabled();
-  $('#ai-remove-key').hidden = !has;
+  $('#ai-remove-key').hidden = !has || builtIn;
 }
 
 // Save a key typed anywhere; a recognizable prefix picks the provider automatically.
@@ -995,6 +998,14 @@ window.addEventListener('resize', () => { if (engine) engine.resize(); });
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW registration failed', err));
+  });
+  // When an updated version takes over, reload once so the page runs the new code
+  // (never mid-song).
+  let hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) { hadController = true; return; }
+    if (engine && engine.state === 'playing') return;
+    location.reload();
   });
 }
 
