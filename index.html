@@ -124,12 +124,12 @@
       <h3 id="match-heading">Best matches</h3>
       <p id="match-ai-error" class="error-text" hidden></p>
       <form id="match-key-form" class="key-form" hidden>
-        <p class="muted">Let AI write the notes for this song. Paste your Anthropic API key — it stays on this device and is only sent to api.anthropic.com.</p>
+        <p class="muted">Let AI write the notes for this song. Paste an API key — Anthropic (sk-ant-…) or OpenRouter (sk-or-…). It stays on this device and is only sent to that provider.</p>
         <div class="key-row">
-          <input id="match-key-input" type="password" placeholder="sk-ant-…" autocomplete="off" required>
+          <input id="match-key-input" type="password" placeholder="sk-ant-… or sk-or-…" autocomplete="off" required>
           <button class="btn btn-primary" type="submit">✨ Save &amp; write notes</button>
         </div>
-        <p class="muted small">Get a key at console.anthropic.com → API keys. Each song costs a few cents.</p>
+        <p class="muted small">OpenRouter keys use the free Nemotron Ultra model by default; Anthropic keys use Claude. Change either under ✨ AI notes.</p>
       </form>
       <div id="match-list" class="match-list"></div>
       <div class="match-fallback">
@@ -165,21 +165,24 @@
   <div class="sheet" role="dialog" aria-modal="true">
     <button class="sheet-close" data-close-sheet title="Close">✕</button>
     <h3>✨ AI notes</h3>
-    <p class="muted">When a song isn't in the library, Pianiol asks Claude to write out the melody and accompaniment from its knowledge of the piece, then plays it on your instrument. Calls go straight from this device to api.anthropic.com using your own key.</p>
+    <p class="muted">When a song isn't in the library, Pianiol asks an AI model to write out the melody and accompaniment from its knowledge of the piece, then plays it on your instrument. Calls go straight from this device to the AI provider using your own key.</p>
     <form id="ai-form" class="key-form">
-      <label for="ai-key-input">Anthropic API key</label>
+      <label for="ai-provider-select">Provider</label>
+      <select id="ai-provider-select" class="pill-select"></select>
+      <label for="ai-key-input">API key</label>
       <div class="key-row">
-        <input id="ai-key-input" type="password" placeholder="sk-ant-…" autocomplete="off">
+        <input id="ai-key-input" type="password" placeholder="sk-…" autocomplete="off">
         <button class="btn btn-primary" type="submit">Save</button>
       </div>
       <p id="ai-key-status" class="muted small"></p>
       <label for="ai-model-select">Model</label>
       <select id="ai-model-select" class="pill-select"></select>
+      <input id="ai-or-model-input" class="pill-select" type="text" placeholder="nvidia/llama-3.1-nemotron-ultra-253b-v1:free" autocomplete="off" hidden>
       <label class="check-row">
         <input id="ai-online-toggle" type="checkbox">
         <span>Also search public MIDI archives online when AI is unavailable</span>
       </label>
-      <p class="muted small">Get a key at console.anthropic.com → API keys, and set a spending limit there. A typical song costs a few cents. Declined requests fall back to another Claude model automatically.</p>
+      <p id="ai-provider-note" class="muted small"></p>
       <div class="fallback-btns">
         <button id="ai-remove-key" class="btn" type="button">Remove key</button>
       </div>
