@@ -1,5 +1,5 @@
 // Pianiol service worker — offline app shell.
-const VERSION = 'pianiol-v1';
+const VERSION = 'pianiol-v2';
 const SHELL = [
   './',
   './index.html',
@@ -12,6 +12,7 @@ const SHELL = [
   './js/songs-data.js',
   './js/search.js',
   './js/share.js',
+  './js/finder.js',
   './js/transcribe.js',
   './manifest.webmanifest',
   './icons/icon.svg',
