@@ -1,10 +1,11 @@
-// Pianiol — app shell: screens, search, share-target flow, listen mode, player controls.
+// Pianiol — app shell: screens, search, link → notes resolver, listen mode, player controls.
 import { Synth, INSTRUMENTS } from './synth.js';
 import { FallingNotes } from './engine.js';
 import { parseMidi, midiToSong } from './midi.js';
 import { SONGS, songToNotes, midiToName } from './library.js';
 import { searchSongs } from './search.js';
-import { parseSharedParams, extractUrlFromText, fetchVideoMeta, videoIdThumb } from './share.js';
+import { parseSharedParams, extractUrlFromText, videoIdThumb } from './share.js';
+import { resolve, loadCandidate } from './finder.js';
 import { Transcriber } from './transcribe.js';
 
 const $ = sel => document.querySelector(sel);
@@ -30,6 +31,7 @@ function closeSheet(backdrop) { backdrop.hidden = true; }
 function closeAllSheets() {
   for (const el of document.querySelectorAll('.sheet-backdrop')) el.hidden = true;
   stopListening(false);
+  cancelResolve();
 }
 
 document.addEventListener('click', e => {
@@ -52,7 +54,38 @@ function fmtTime(sec) {
   return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
 }
 
+/* ---------------- instruments (persisted) ---------------- */
+
+const instSelects = [$('#instrument-select'), $('#match-instrument-select')];
+for (const sel of instSelects) {
+  for (const inst of INSTRUMENTS) {
+    const opt = document.createElement('option');
+    opt.value = inst.id;
+    opt.textContent = `${inst.emoji} ${inst.name}`;
+    sel.appendChild(opt);
+  }
+  sel.addEventListener('change', () => setInstrument(sel.value));
+}
+
+function setInstrument(id) {
+  if (!INSTRUMENTS.some(i => i.id === id)) id = 'piano';
+  synth.setInstrument(id);
+  for (const sel of instSelects) sel.value = id;
+  try { localStorage.setItem('pianiol.instrument', id); } catch { /* private mode */ }
+}
+function instrumentName(id) {
+  const inst = INSTRUMENTS.find(i => i.id === id);
+  return inst ? inst.name : 'Piano';
+}
+(() => {
+  let saved = 'piano';
+  try { saved = localStorage.getItem('pianiol.instrument') || 'piano'; } catch { /* ignore */ }
+  setInstrument(saved);
+})();
+
 /* ---------------- player ---------------- */
+
+let lastResolve = null; // candidates to offer again when the user backs out of an auto-play
 
 function initEngine() {
   if (engine) return;
@@ -72,7 +105,7 @@ function setPlayIcon(playing) { $('#btn-play').textContent = playing ? '❚❚' 
 function openPlayer(song, { autoplay = true } = {}) {
   if (!song || !song.notes || !song.notes.length) {
     toast('No notes found in that song.');
-    return;
+    return false;
   }
   initEngine();
   closeAllSheets();
@@ -93,12 +126,17 @@ function openPlayer(song, { autoplay = true } = {}) {
   } else {
     setPlayIcon(false);
   }
+  return true;
 }
 
 $('#btn-back').addEventListener('click', () => {
   if (engine) engine.pause();
   setPlayIcon(false);
   showScreen('home');
+  // Auto-played from a link? Offer the other matches on the way out.
+  if (lastResolve && lastResolve.candidates.length > 1) {
+    showCandidates(lastResolve, { heading: 'Pick a different match' });
+  }
 });
 
 $('#btn-play').addEventListener('click', async () => {
@@ -139,17 +177,6 @@ function nudgeTranspose(d) {
 $('#btn-transpose-down').addEventListener('click', () => nudgeTranspose(-1));
 $('#btn-transpose-up').addEventListener('click', () => nudgeTranspose(1));
 
-/* ---------------- instruments ---------------- */
-
-const instSel = $('#instrument-select');
-for (const inst of INSTRUMENTS) {
-  const opt = document.createElement('option');
-  opt.value = inst.id;
-  opt.textContent = `${inst.emoji} ${inst.name}`;
-  instSel.appendChild(opt);
-}
-instSel.addEventListener('change', () => synth.setInstrument(instSel.value));
-
 /* ---------------- library & search ---------------- */
 
 function renderLibrary() {
@@ -167,7 +194,7 @@ function renderLibrary() {
     btn.querySelector('.sc-title').textContent = song.title;
     btn.querySelector('.sc-artist').textContent = song.artist;
     btn.querySelector('.sc-meta').textContent = `${song.notes.length} notes · ${fmtTime(secs)}`;
-    btn.addEventListener('click', () => openPlayer(songToNotes(song)));
+    btn.addEventListener('click', () => { lastResolve = null; openPlayer(songToNotes(song)); });
     grid.appendChild(btn);
   }
 }
@@ -175,43 +202,68 @@ function renderLibrary() {
 const searchInput = $('#search-input');
 const searchResults = $('#search-results');
 
+function resultRow(className, html) {
+  const btn = document.createElement('button');
+  btn.className = `search-result ${className}`.trim();
+  btn.innerHTML = html;
+  return btn;
+}
+
 function runSearch() {
   const q = searchInput.value.trim();
   if (q.length < 2) { searchResults.hidden = true; return; }
-  const hits = searchSongs(q, SONGS, { limit: 6 });
   searchResults.textContent = '';
-  if (!hits.length) {
-    const div = document.createElement('div');
-    div.className = 'search-empty';
-    div.textContent = 'No match in the library — try Import MIDI or Listen mode.';
-    searchResults.appendChild(div);
-  } else {
-    for (const { song, score } of hits) {
-      const btn = document.createElement('button');
-      btn.className = 'search-result';
-      btn.innerHTML = `<span>🎵</span><span><span class="sr-title"></span> <span class="sr-artist"></span></span><span class="sr-score"></span>`;
-      btn.querySelector('.sr-title').textContent = song.title;
-      btn.querySelector('.sr-artist').textContent = `· ${song.artist}`;
-      btn.querySelector('.sr-score').textContent = `${Math.round(score * 100)}%`;
-      btn.addEventListener('click', () => {
-        searchResults.hidden = true;
-        searchInput.value = '';
-        openPlayer(songToNotes(song));
-      });
-      searchResults.appendChild(btn);
-    }
+
+  const url = extractUrlFromText(q);
+  if (url) {
+    const btn = resultRow('web', `<span>🔗</span><span>Find the notes for this link</span>`);
+    btn.addEventListener('click', () => { searchInput.value = ''; searchResults.hidden = true; findAndPlay(url); });
+    searchResults.appendChild(btn);
+    searchResults.hidden = false;
+    return;
+  }
+
+  const hits = searchSongs(q, SONGS, { limit: 6 });
+  for (const { song, score } of hits) {
+    const btn = resultRow('', `<span>🎵</span><span><span class="sr-title"></span> <span class="sr-artist"></span></span><span class="sr-score"></span>`);
+    btn.querySelector('.sr-title').textContent = song.title;
+    btn.querySelector('.sr-artist').textContent = `· ${song.artist}`;
+    btn.querySelector('.sr-score').textContent = `${Math.round(score * 100)}%`;
+    btn.addEventListener('click', () => {
+      searchResults.hidden = true;
+      searchInput.value = '';
+      lastResolve = null;
+      openPlayer(songToNotes(song));
+    });
+    searchResults.appendChild(btn);
+  }
+  if (q.length >= 3) {
+    const btn = resultRow('web', `<span>🌐</span><span>Search the web for “<span class="sr-q"></span>”</span>`);
+    btn.querySelector('.sr-q').textContent = q;
+    btn.addEventListener('click', () => { searchInput.value = ''; searchResults.hidden = true; findAndPlay(q); });
+    searchResults.appendChild(btn);
   }
   searchResults.hidden = false;
 }
 
 searchInput.addEventListener('input', runSearch);
-searchInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter') {
+searchInput.addEventListener('paste', () => {
+  // Let the paste land, then auto-run if it was a link.
+  setTimeout(() => {
     const url = extractUrlFromText(searchInput.value);
-    if (url) { handleVideoUrl(url, ''); searchInput.value = ''; searchResults.hidden = true; return; }
-    const first = searchResults.querySelector('.search-result');
-    if (first) first.click();
-  }
+    if (url) { searchInput.value = ''; searchResults.hidden = true; findAndPlay(url); }
+    else runSearch();
+  }, 0);
+});
+searchInput.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  const q = searchInput.value.trim();
+  const url = extractUrlFromText(q);
+  searchResults.hidden = true;
+  if (url) { searchInput.value = ''; findAndPlay(url); return; }
+  const first = searchResults.querySelector('.search-result:not(.web)');
+  if (first) { first.click(); return; }
+  if (q.length >= 2) { searchInput.value = ''; findAndPlay(q); }
 });
 document.addEventListener('pointerdown', e => {
   if (!e.target.closest('.search-wrap')) searchResults.hidden = true;
@@ -233,6 +285,7 @@ $('#midi-file').addEventListener('change', async e => {
       song.title = file.name.replace(/\.(midi?|MIDI?)$/, '');
     }
     song.artist = song.artist || 'Imported MIDI';
+    lastResolve = null;
     openPlayer(song);
   } catch (err) {
     console.warn(err);
@@ -240,7 +293,7 @@ $('#midi-file').addEventListener('change', async e => {
   }
 });
 
-/* ---------------- paste-a-link ---------------- */
+/* ---------------- paste-a-link sheet ---------------- */
 
 $('#btn-link').addEventListener('click', () => {
   openSheet($('#link-backdrop'));
@@ -251,61 +304,128 @@ $('#link-form').addEventListener('submit', e => {
   const url = extractUrlFromText($('#link-input').value);
   closeSheet($('#link-backdrop'));
   $('#link-input').value = '';
-  if (url) handleVideoUrl(url, '');
+  if (url) findAndPlay(url);
   else toast('That does not look like a link.');
 });
 
-/* ---------------- share target / video matching ---------------- */
+/* ---------------- link / name → notes resolver ---------------- */
 
-async function handleVideoUrl(videoUrl, rawTitle) {
-  const backdrop = $('#sheet-backdrop');
-  openSheet(backdrop);
+let resolveCtrl = null;
+
+function cancelResolve() {
+  if (resolveCtrl) { resolveCtrl.abort(); resolveCtrl = null; }
+}
+
+function setStatus(msg) {
+  $('#match-status').textContent = msg;
   $('#match-loading').hidden = false;
-  $('#match-content').hidden = true;
+}
 
-  let title = rawTitle || '';
-  let author = '';
-  if (videoUrl) {
-    const meta = await fetchVideoMeta(videoUrl);
-    if (meta && meta.title) { title = meta.title; author = meta.author || ''; }
-  }
-
-  $('#match-loading').hidden = true;
-  $('#match-content').hidden = false;
-
-  const thumb = videoUrl ? videoIdThumb(videoUrl) : null;
+function showIdentity(identity, fallbackTitle) {
   const thumbEl = $('#match-thumb');
+  const thumb = identity && identity.url ? videoIdThumb(identity.url) : null;
   thumbEl.onerror = () => { thumbEl.hidden = true; };
   if (thumb) { thumbEl.src = thumb; thumbEl.hidden = false; } else { thumbEl.hidden = true; }
-  $('#match-title').textContent = title || 'Shared video';
-  $('#match-author').textContent = author;
+  $('#match-title').textContent = (identity && identity.videoTitle) || fallbackTitle || 'Shared video';
+  $('#match-author').textContent = (identity && identity.author) || '';
+}
 
+function sourceBadge(c) {
+  const span = document.createElement('span');
+  span.className = `mi-source ${c.source === 'library' ? 'library' : ''}`;
+  span.textContent = c.source === 'library' ? 'library' : c.sourceName;
+  return span;
+}
+
+function showCandidates(result, { heading } = {}) {
+  const backdrop = $('#sheet-backdrop');
+  openSheet(backdrop);
+  $('#match-loading').hidden = true;
+  $('#match-content').hidden = false;
+  showIdentity(result.identity, '');
   const list = $('#match-list');
   list.textContent = '';
-  const query = [title, author].filter(Boolean).join(' ');
-  const hits = query ? searchSongs(query, SONGS, { limit: 5 }) : [];
+  const cands = result.candidates.slice(0, 8);
+  if (heading) $('#match-heading').textContent = heading;
+  else if (cands.length) $('#match-heading').textContent = 'Closest matches — tap one to play';
+  else $('#match-heading').textContent = result.reason === 'unreadable'
+    ? 'Could not read that link'
+    : 'Nothing found for this one yet';
 
-  if (hits.length) {
-    $('#match-heading').textContent = 'Best matches in the library';
-    for (const { song, score } of hits) {
-      const btn = document.createElement('button');
-      btn.className = 'match-item';
-      btn.innerHTML = `<span>🎵</span><span class="mi-body"><span class="mi-title"></span><span class="mi-artist"></span></span><span class="mi-score"></span>`;
-      btn.querySelector('.mi-title').textContent = song.title;
-      btn.querySelector('.mi-artist').textContent = song.artist;
-      btn.querySelector('.mi-score').textContent = `${Math.round(score * 100)}% match`;
-      btn.addEventListener('click', () => openPlayer(songToNotes(song)));
-      list.appendChild(btn);
-    }
-  } else {
-    $('#match-heading').textContent = title
-      ? 'No library match for this one yet'
-      : 'Could not read the video title';
+  for (const c of cands) {
+    const btn = document.createElement('button');
+    btn.className = 'match-item';
+    btn.innerHTML = `<span>🎵</span><span class="mi-body"><span class="mi-title"></span><span class="mi-artist"></span></span>`;
+    btn.querySelector('.mi-title').textContent = c.title;
+    btn.querySelector('.mi-artist').textContent = c.subtitle || `${Math.round(c.score * 100)}% match`;
+    btn.appendChild(sourceBadge(c));
+    btn.addEventListener('click', () => playCandidate(c, result));
+    list.appendChild(btn);
+  }
+  if (!cands.length) {
     const p = document.createElement('p');
     p.className = 'muted';
     p.textContent = 'You can still get the notes: transcribe it with Listen mode while the video plays, or import a MIDI of the song.';
     list.appendChild(p);
   }
+}
+
+async function playCandidate(c, result) {
+  lastResolve = result;
+  if (c.source === 'library') { openPlayer(songToNotes(c.song)); return; }
+  cancelResolve();
+  resolveCtrl = new AbortController();
+  $('#match-content').hidden = true;
+  setStatus(`Downloading "${c.title}"…`);
+  const song = await loadCandidate(c, { signal: resolveCtrl.signal, onStatus: setStatus });
+  if (resolveCtrl && resolveCtrl.signal.aborted) return;
+  if (song) {
+    openPlayer(song);
+    toast(`▶ ${song.title} · ${instrumentName(synth.instrument)}`);
+  } else {
+    toast('That file could not be loaded — try another match.');
+    showCandidates(result);
+  }
+}
+
+// The main entry point: a link, a shared video, or a typed song name.
+async function findAndPlay(input, { rawTitle = '' } = {}) {
+  cancelResolve();
+  resolveCtrl = new AbortController();
+  const { signal } = resolveCtrl;
+
+  openSheet($('#sheet-backdrop'));
+  $('#match-content').hidden = true;
+  showIdentity(null, rawTitle || (extractUrlFromText(input) ? 'Shared video' : input));
+  setStatus(extractUrlFromText(input) ? 'Reading the video title…' : `Looking for "${input}"…`);
+
+  let result;
+  try {
+    result = await resolve(input, {
+      library: SONGS,
+      toSong: songToNotes,
+      rawTitle,
+      signal,
+      onStatus(msg) { if (!signal.aborted) { setStatus(msg); } },
+    });
+  } catch (err) {
+    console.warn(err);
+    result = { kind: 'none', identity: null, candidates: [], reason: 'error' };
+  }
+  if (signal.aborted) return;
+  resolveCtrl = null;
+
+  if (result.identity) showIdentity(result.identity, '');
+
+  if (result.kind === 'library' || result.kind === 'online') {
+    lastResolve = result;
+    openPlayer(result.song);
+    const where = result.kind === 'library' ? 'from the library' : `from ${result.candidate.sourceName}`;
+    const more = result.candidates.length > 1 ? ' Not it? Tap ← for other matches.' : '';
+    toast(`▶ ${result.song.title} ${where} · ${instrumentName(synth.instrument)}.${more}`, 5000);
+    return;
+  }
+  showCandidates(result);
 }
 
 $('#match-listen').addEventListener('click', () => {
@@ -319,7 +439,7 @@ function checkShareTarget() {
   if (params.has('title') || params.has('text') || params.has('url')) {
     history.replaceState(null, '', location.pathname);
   }
-  if (shared) handleVideoUrl(shared.videoUrl, shared.rawTitle);
+  if (shared) findAndPlay(shared.videoUrl || shared.rawTitle, { rawTitle: shared.rawTitle });
 }
 
 /* ---------------- listen mode ---------------- */
@@ -370,6 +490,7 @@ function stopListening(open) {
   const song = transcriber.stop();
   if (open) {
     if (song && song.notes.length >= 3) {
+      lastResolve = null;
       openPlayer(song);
     } else {
       toast('Not enough notes heard — try again closer to the speaker.');

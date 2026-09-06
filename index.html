@@ -24,7 +24,7 @@
   </header>
 
   <div class="search-wrap">
-    <input id="search-input" type="search" placeholder="Find a song… (e.g. Für Elise, Tetris)" autocomplete="off" enterkeyhint="search">
+    <input id="search-input" type="search" placeholder="Type a song, or paste a YouTube / TikTok link…" autocomplete="off" enterkeyhint="search">
     <div id="search-results" class="search-results" hidden></div>
   </div>
 
@@ -104,19 +104,19 @@
 <div id="sheet-backdrop" class="sheet-backdrop" hidden>
   <div id="match-sheet" class="sheet" role="dialog" aria-modal="true">
     <button class="sheet-close" data-close-sheet title="Close">✕</button>
+    <div class="match-video">
+      <img id="match-thumb" alt="" hidden>
+      <div>
+        <strong id="match-title">Finding your song…</strong>
+        <span id="match-author" class="muted"></span>
+      </div>
+    </div>
     <div id="match-loading" class="match-loading">
-      <div class="spinner"></div>
-      <p>Finding your song…</p>
+      <div class="spinner small"></div>
+      <p id="match-status">Finding your song…</p>
     </div>
     <div id="match-content" hidden>
-      <div class="match-video">
-        <img id="match-thumb" alt="" hidden>
-        <div>
-          <strong id="match-title">Shared video</strong>
-          <span id="match-author" class="muted"></span>
-        </div>
-      </div>
-      <h3 id="match-heading">Best matches in the library</h3>
+      <h3 id="match-heading">Best matches</h3>
       <div id="match-list" class="match-list"></div>
       <div class="match-fallback">
         <p class="muted">Not the right one?</p>
@@ -126,6 +126,10 @@
         </div>
       </div>
     </div>
+    <div class="match-instrument">
+      <label for="match-instrument-select">Play it on</label>
+      <select id="match-instrument-select" class="pill-select"></select>
+    </div>
   </div>
 </div>
 
@@ -134,7 +138,7 @@
   <div class="sheet" role="dialog" aria-modal="true">
     <button class="sheet-close" data-close-sheet title="Close">✕</button>
     <h3>Paste a video link</h3>
-    <p class="muted">Drop in a YouTube or TikTok link and Pianiol will look up the song.</p>
+    <p class="muted">Drop in a YouTube or TikTok link. Pianiol reads the video title, looks the song up in its library and in public MIDI archives, and starts playing it.</p>
     <form id="link-form" class="link-form">
       <input id="link-input" type="url" placeholder="https://youtube.com/watch?v=… or tiktok.com/…" required>
       <button class="btn btn-primary" type="submit">Find notes</button>
