@@ -6,6 +6,7 @@
 //   • OpenRouter — OpenAI-compatible chat completions; default model NVIDIA Nemotron Ultra (free)
 
 import { songToNotes } from './library.js';
+import { BUILT_IN } from './config.js';
 
 export const PROVIDERS = [
   { id: 'anthropic', name: 'Anthropic — Claude', keyPrefix: 'sk-ant-', keyStorage: 'pianiol.anthropicKey', modelStorage: 'pianiol.aiModel' },
@@ -36,15 +37,25 @@ export function detectProvider(key) {
   const p = PROVIDERS.find(x => k.startsWith(x.keyPrefix));
   return p ? p.id : null;
 }
+const builtInKey = provider => (provider === 'openrouter' && BUILT_IN && BUILT_IN.openrouterKey ? String(BUILT_IN.openrouterKey).trim() : '');
+
 export function getProvider() {
   const saved = lsGet(PROVIDER_STORAGE);
   if (PROVIDERS.some(p => p.id === saved)) return saved;
   const withKey = PROVIDERS.find(p => (lsGet(p.keyStorage) || '').trim());
-  return withKey ? withKey.id : 'anthropic';
+  if (withKey) return withKey.id;
+  return builtInKey('openrouter') ? 'openrouter' : 'anthropic';
 }
 export function setProvider(id) { lsSet(PROVIDER_STORAGE, PROVIDERS.some(p => p.id === id) ? id : null); }
 
-export function getApiKey(provider = getProvider()) { return (lsGet(providerInfo(provider).keyStorage) || '').trim(); }
+// The stored key wins; otherwise the built-in one (if the app ships one).
+export function getApiKey(provider = getProvider()) {
+  const stored = (lsGet(providerInfo(provider).keyStorage) || '').trim();
+  return stored || builtInKey(provider);
+}
+export function isBuiltInKey(provider = getProvider()) {
+  return !(lsGet(providerInfo(provider).keyStorage) || '').trim() && !!builtInKey(provider);
+}
 // Saving a key whose prefix identifies a provider switches to that provider.
 export function setApiKey(key, provider) {
   const k = key ? String(key).trim() : '';
@@ -58,7 +69,7 @@ export function hasApiKey(provider = getProvider()) { return getApiKey(provider)
 export function getAiModel(provider = getProvider()) {
   const m = lsGet(providerInfo(provider).modelStorage);
   if (provider === 'anthropic') return AI_MODELS.some(x => x.id === m) ? m : DEFAULT_MODEL;
-  return (m || '').trim() || OPENROUTER_DEFAULT_MODEL;
+  return (m || '').trim() || (BUILT_IN && BUILT_IN.openrouterModel) || OPENROUTER_DEFAULT_MODEL;
 }
 export function setAiModel(id, provider = getProvider()) {
   const info = providerInfo(provider);
