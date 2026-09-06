@@ -44,6 +44,11 @@
       <span class="action-label">Listen</span>
       <span class="action-sub">Transcribe by ear</span>
     </button>
+    <button id="btn-ai" class="action-card">
+      <span class="action-emoji">✨</span>
+      <span class="action-label">AI notes</span>
+      <span id="ai-card-sub" class="action-sub">Set up</span>
+    </button>
   </div>
   <input id="midi-file" type="file" accept=".mid,.midi,audio/midi,audio/x-midi" hidden>
 
@@ -117,6 +122,15 @@
     </div>
     <div id="match-content" hidden>
       <h3 id="match-heading">Best matches</h3>
+      <p id="match-ai-error" class="error-text" hidden></p>
+      <form id="match-key-form" class="key-form" hidden>
+        <p class="muted">Let AI write the notes for this song. Paste your Anthropic API key — it stays on this device and is only sent to api.anthropic.com.</p>
+        <div class="key-row">
+          <input id="match-key-input" type="password" placeholder="sk-ant-…" autocomplete="off" required>
+          <button class="btn btn-primary" type="submit">✨ Save &amp; write notes</button>
+        </div>
+        <p class="muted small">Get a key at console.anthropic.com → API keys. Each song costs a few cents.</p>
+      </form>
       <div id="match-list" class="match-list"></div>
       <div class="match-fallback">
         <p class="muted">Not the right one?</p>
@@ -142,6 +156,33 @@
     <form id="link-form" class="link-form">
       <input id="link-input" type="url" placeholder="https://youtube.com/watch?v=… or tiktok.com/…" required>
       <button class="btn btn-primary" type="submit">Find notes</button>
+    </form>
+  </div>
+</div>
+
+<!-- ============ AI SETTINGS SHEET ============ -->
+<div id="ai-backdrop" class="sheet-backdrop" hidden>
+  <div class="sheet" role="dialog" aria-modal="true">
+    <button class="sheet-close" data-close-sheet title="Close">✕</button>
+    <h3>✨ AI notes</h3>
+    <p class="muted">When a song isn't in the library, Pianiol asks Claude to write out the melody and accompaniment from its knowledge of the piece, then plays it on your instrument. Calls go straight from this device to api.anthropic.com using your own key.</p>
+    <form id="ai-form" class="key-form">
+      <label for="ai-key-input">Anthropic API key</label>
+      <div class="key-row">
+        <input id="ai-key-input" type="password" placeholder="sk-ant-…" autocomplete="off">
+        <button class="btn btn-primary" type="submit">Save</button>
+      </div>
+      <p id="ai-key-status" class="muted small"></p>
+      <label for="ai-model-select">Model</label>
+      <select id="ai-model-select" class="pill-select"></select>
+      <label class="check-row">
+        <input id="ai-online-toggle" type="checkbox">
+        <span>Also search public MIDI archives online when AI is unavailable</span>
+      </label>
+      <p class="muted small">Get a key at console.anthropic.com → API keys, and set a spending limit there. A typical song costs a few cents. Declined requests fall back to another Claude model automatically.</p>
+      <div class="fallback-btns">
+        <button id="ai-remove-key" class="btn" type="button">Remove key</button>
+      </div>
     </form>
   </div>
 </div>

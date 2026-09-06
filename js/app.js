@@ -6,6 +6,7 @@ import { SONGS, songToNotes, midiToName } from './library.js';
 import { searchSongs } from './search.js';
 import { parseSharedParams, extractUrlFromText, videoIdThumb } from './share.js';
 import { resolve, loadCandidate } from './finder.js';
+import { AI_MODELS, getApiKey, setApiKey, hasApiKey, getAiModel, setAiModel } from './ai.js';
 import { Transcriber } from './transcribe.js';
 
 const $ = sel => document.querySelector(sel);
@@ -83,9 +84,54 @@ function instrumentName(id) {
   setInstrument(saved);
 })();
 
+/* ---------------- AI settings ---------------- */
+
+function onlineEnabled() {
+  try { return localStorage.getItem('pianiol.online') === '1'; } catch { return false; }
+}
+function maskKey(key) {
+  return key.length > 12 ? `${key.slice(0, 7)}…${key.slice(-4)}` : '••••';
+}
+function refreshAiUi() {
+  const has = hasApiKey();
+  $('#ai-card-sub').textContent = has ? 'Ready' : 'Set up';
+  $('#btn-ai').classList.toggle('ready', has);
+  $('#ai-key-status').textContent = has ? `Key saved: ${maskKey(getApiKey())}` : 'No key saved yet.';
+  $('#ai-key-input').value = '';
+  $('#ai-key-input').placeholder = has ? 'Paste a new key to replace it' : 'sk-ant-…';
+  $('#ai-model-select').value = getAiModel();
+  $('#ai-online-toggle').checked = onlineEnabled();
+  $('#ai-remove-key').hidden = !has;
+}
+
+(() => {
+  const sel = $('#ai-model-select');
+  for (const m of AI_MODELS) {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.name;
+    sel.appendChild(opt);
+  }
+  sel.addEventListener('change', () => setAiModel(sel.value));
+  $('#ai-online-toggle').addEventListener('change', e => {
+    try { localStorage.setItem('pianiol.online', e.target.checked ? '1' : '0'); } catch { /* ignore */ }
+  });
+  $('#btn-ai').addEventListener('click', () => { refreshAiUi(); openSheet($('#ai-backdrop')); });
+  $('#ai-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const key = $('#ai-key-input').value.trim();
+    if (key) { setApiKey(key); toast('API key saved on this device.'); }
+    refreshAiUi();
+    if (key) closeSheet($('#ai-backdrop'));
+  });
+  $('#ai-remove-key').addEventListener('click', () => { setApiKey(''); refreshAiUi(); toast('API key removed.'); });
+  refreshAiUi();
+})();
+
 /* ---------------- player ---------------- */
 
 let lastResolve = null; // candidates to offer again when the user backs out of an auto-play
+let lastInput = null;   // what the resolver last worked on, so "save key & retry" can re-run it
 
 function initEngine() {
   if (engine) return;
@@ -332,7 +378,7 @@ function showIdentity(identity, fallbackTitle) {
 
 function sourceBadge(c) {
   const span = document.createElement('span');
-  span.className = `mi-source ${c.source === 'library' ? 'library' : ''}`;
+  span.className = `mi-source ${c.source === 'library' ? 'library' : c.source === 'ai' ? 'ai' : ''}`;
   span.textContent = c.source === 'library' ? 'library' : c.sourceName;
   return span;
 }
@@ -346,11 +392,20 @@ function showCandidates(result, { heading } = {}) {
   const list = $('#match-list');
   list.textContent = '';
   const cands = result.candidates.slice(0, 8);
+  const errEl = $('#match-ai-error');
+  errEl.hidden = !result.aiError;
+  errEl.textContent = result.aiError || '';
+  const keyForm = $('#match-key-form');
+  keyForm.hidden = !(result.needsKey || (result.aiError && /rejected|No API key/i.test(result.aiError)));
+  if (!keyForm.hidden) $('#match-key-input').value = '';
+
   if (heading) $('#match-heading').textContent = heading;
+  else if (result.reason === 'unreadable') $('#match-heading').textContent = 'Could not read that link';
+  else if (result.needsKey && !cands.length) $('#match-heading').textContent = 'Not in the library — let AI write it';
+  else if (result.needsKey) $('#match-heading').textContent = 'Close matches below, or let AI write the real one';
+  else if (result.aiError) $('#match-heading').textContent = cands.length ? 'AI could not write this one — closest matches' : 'AI could not write this one';
   else if (cands.length) $('#match-heading').textContent = 'Closest matches — tap one to play';
-  else $('#match-heading').textContent = result.reason === 'unreadable'
-    ? 'Could not read that link'
-    : 'Nothing found for this one yet';
+  else $('#match-heading').textContent = 'Nothing found for this one yet';
 
   for (const c of cands) {
     const btn = document.createElement('button');
@@ -362,13 +417,22 @@ function showCandidates(result, { heading } = {}) {
     btn.addEventListener('click', () => playCandidate(c, result));
     list.appendChild(btn);
   }
-  if (!cands.length) {
+  if (!cands.length && keyForm.hidden) {
     const p = document.createElement('p');
     p.className = 'muted';
     p.textContent = 'You can still get the notes: transcribe it with Listen mode while the video plays, or import a MIDI of the song.';
     list.appendChild(p);
   }
 }
+
+$('#match-key-form').addEventListener('submit', e => {
+  e.preventDefault();
+  const key = $('#match-key-input').value.trim();
+  if (!key) return;
+  setApiKey(key);
+  refreshAiUi();
+  if (lastInput) findAndPlay(lastInput.input, { rawTitle: lastInput.rawTitle });
+});
 
 async function playCandidate(c, result) {
   lastResolve = result;
@@ -393,6 +457,7 @@ async function findAndPlay(input, { rawTitle = '' } = {}) {
   cancelResolve();
   resolveCtrl = new AbortController();
   const { signal } = resolveCtrl;
+  lastInput = { input, rawTitle };
 
   openSheet($('#sheet-backdrop'));
   $('#match-content').hidden = true;
@@ -406,23 +471,32 @@ async function findAndPlay(input, { rawTitle = '' } = {}) {
       toSong: songToNotes,
       rawTitle,
       signal,
+      ai: { apiKey: getApiKey(), model: getAiModel() },
+      online: { enabled: onlineEnabled() },
       onStatus(msg) { if (!signal.aborted) { setStatus(msg); } },
     });
   } catch (err) {
+    if (signal.aborted) return;
     console.warn(err);
-    result = { kind: 'none', identity: null, candidates: [], reason: 'error' };
+    result = { kind: 'none', identity: null, candidates: [], reason: 'error', aiError: err && err.message };
   }
   if (signal.aborted) return;
   resolveCtrl = null;
 
   if (result.identity) showIdentity(result.identity, '');
 
-  if (result.kind === 'library' || result.kind === 'online') {
+  if (result.kind === 'library' || result.kind === 'online' || result.kind === 'ai') {
     lastResolve = result;
     openPlayer(result.song);
-    const where = result.kind === 'library' ? 'from the library' : `from ${result.candidate.sourceName}`;
-    const more = result.candidates.length > 1 ? ' Not it? Tap ← for other matches.' : '';
-    toast(`▶ ${result.song.title} ${where} · ${instrumentName(synth.instrument)}.${more}`, 5000);
+    const inst = instrumentName(synth.instrument);
+    if (result.kind === 'ai') {
+      const conf = result.song.confidence && result.song.confidence !== 'high' ? ` (AI confidence: ${result.song.confidence})` : '';
+      toast(`✨ Notes written by AI${conf} · ${inst}`, 5000);
+    } else {
+      const where = result.kind === 'library' ? 'from the library' : `from ${result.candidate.sourceName}`;
+      const more = result.candidates.length > 1 ? ' Not it? Tap ← for other matches.' : '';
+      toast(`▶ ${result.song.title} ${where} · ${inst}.${more}`, 5000);
+    }
     return;
   }
   showCandidates(result);

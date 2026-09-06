@@ -10,6 +10,7 @@
 import { fetchVideoMeta, extractUrlFromText } from './share.js';
 import { normalizeTitle, fuzzyScore, searchSongs } from './search.js';
 import { parseMidi, midiToSong } from './midi.js';
+import { composeSong } from './ai.js';
 
 export const LIBRARY_AUTO_THRESHOLD = 0.6; // library match good enough to auto-play
 export const ONLINE_AUTO_THRESHOLD = 0.45; // web MIDI match good enough to auto-play
@@ -275,8 +276,10 @@ export async function loadCandidate(candidate, { signal, onStatus } = {}) {
 // Resolve user input into something playable.
 //   library:  array of library songs (title/artist/aliases/notes...)
 //   toSong:   library song → runtime song
-// Returns { kind: 'library'|'online'|'none', identity, song?, score?, candidates }
-export async function resolve(input, { library, toSong, rawTitle = '', onStatus, signal } = {}) {
+//   ai:       { apiKey, model } — when apiKey is set, the AI writes the notes
+//   online:   { enabled } — whether to also search public MIDI archives
+// Returns { kind: 'library'|'ai'|'online'|'none', identity, song?, score?, candidates, aiError?, needsKey? }
+export async function resolve(input, { library, toSong, rawTitle = '', onStatus, signal, ai = {}, online = { enabled: false } } = {}) {
   const identity = await identify(input, { rawTitle, onStatus });
   if (!identity) return { kind: 'none', identity: null, candidates: [], reason: 'unreadable' };
 
@@ -301,15 +304,37 @@ export async function resolve(input, { library, toSong, rawTitle = '', onStatus,
     };
   }
 
-  // 2. Online MIDI archives.
-  const online = await searchOnline(identity.queries, { signal, onStatus });
-  const candidates = [...libCandidates, ...online].sort((a, b) => b.score - a.score);
-  const tryList = online.filter(c => c.score >= ONLINE_AUTO_THRESHOLD).slice(0, 3);
+  // 2. AI writes the notes from its knowledge of the piece.
+  let aiError = null;
+  if (ai && ai.apiKey) {
+    try {
+      const song = await composeSong(
+        { title: identity.title || identity.videoTitle, artist: identity.artist, context: identity.videoTitle },
+        { apiKey: ai.apiKey, model: ai.model, signal, onStatus },
+      );
+      return { kind: 'ai', identity, song, candidates: libCandidates, score: 1 };
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      aiError = err && err.message ? err.message : 'AI request failed.';
+    }
+  }
+
+  // 3. Public MIDI archives (optional).
+  let onlineHits = [];
+  if (online && online.enabled) {
+    onlineHits = await searchOnline(identity.queries, { signal, onStatus });
+  }
+  const candidates = [...libCandidates, ...onlineHits].sort((a, b) => b.score - a.score);
+  const tryList = onlineHits.filter(c => c.score >= ONLINE_AUTO_THRESHOLD).slice(0, 3);
   for (const c of tryList) {
     if (signal?.aborted) break;
     const song = await loadCandidate(c, { signal, onStatus });
-    if (song) return { kind: 'online', identity, score: c.score, song, candidate: c, candidates };
+    if (song) return { kind: 'online', identity, score: c.score, song, candidate: c, candidates, aiError };
   }
 
-  return { kind: 'none', identity, candidates, reason: online.length ? 'weak' : 'nothing' };
+  return {
+    kind: 'none', identity, candidates, aiError,
+    needsKey: !(ai && ai.apiKey),
+    reason: aiError ? 'ai-failed' : onlineHits.length ? 'weak' : 'nothing',
+  };
 }
